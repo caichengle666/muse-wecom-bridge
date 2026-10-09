@@ -1,0 +1,8 @@
+{
+  "allowedUserIds": ["你的企业微信userid"],
+  "allowAll": false,
+  "replyTimeoutMin": 20,
+  "wsUrl": "wss://openws.work.weixin.qq.com",
+  "allowedFileRoots": [],
+  "logMessageText": false
+}

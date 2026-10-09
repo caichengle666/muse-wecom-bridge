@@ -1,0 +1,43 @@
+# 凭证与密钥（真实值永不提交）
+secrets.env
+*.env
+!.env.example
+
+# 依赖
+node_modules/
+
+# 构建产物（自行 npm run build）
+dist/
+
+# 运行时数据
+*.log
+debug.log.*
+heartbeat.json
+kicked.json
+state.json
+cards.json
+daemon.pid
+daemon.lock
+daemon.lock.stale.*
+card_events.json
+.keepalive.lock.d/
+.keepalive.lock
+inbox/
+outbox/
+sent/
+failed/
+expired/
+progress/
+inflight/
+incoming/
+feedback_raw/
+outgoing/*
+!outgoing/.gitkeep
+
+# 本地配置
+config.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
+__pycache__/
