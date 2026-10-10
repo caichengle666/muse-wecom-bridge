@@ -25,6 +25,21 @@ npm run build && npm test
 npm start                            # 或用 keepalive.sh + cron 常驻
 ```
 
+## 不会申请机器人？让 Muse 代办
+
+没操作过企业微信管理后台不用自己研究——直接在 **Muse App 里开启浏览器操作模式**，跟 Muse 说：
+
+> "帮我在企业微信创建一个 Muse 智能机器人"
+
+Muse 会在浏览器里帮你走完：
+
+1. 进入企业微信管理后台，创建智能机器人并切换到 API 模式 + 长连接
+2. 取出 BotID 和 Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
+
+你只需要在登录、扫码验证这类环节接管一下浏览器。
+
+白名单要填你自己的企业微信 userid（一般在管理后台通讯录里能看到，不知道的话让 Muse 帮你找），填进 `config.json` 的 `allowedUserIds` 后重启。
+
 ## 外部影响
 
 - 本机主动向外建 WebSocket 长连接（`wss://openws.work.weixin.qq.com`），无需公网回调地址
