@@ -22,7 +22,7 @@ Muse 会照着 SKILL.md 自己走完：创建企业微信智能机器人、拿 B
 | 方向 | 能力 |
 |------|------|
 | 接收 | 文本、语音（企业微信已转写）、图片/文件/视频（自动下载解密）、引用消息 |
-| 回复 | 流式打字机（边生成边显示，0.2.0）、流式文本、文件/图片/视频（按扩展名原生发出）、模板卡片（5 种类型）、流式配图（最多 10 张） |
+| 回复 | 流式打字机（边生成边显示）、流式文本、文件/图片/视频（按扩展名原生发出）、模板卡片（5 种类型）、流式配图（最多 10 张） |
 | 交互 | 模板卡片按钮回调 + 5 秒内动态更新卡片、进入会话欢迎语、点赞/点踩反馈、被顶号感知 |
 | 主动 | 定时/事件触发主动推送（文本、卡片、文件、图片），如每日 DPMC 早报 |
 | 可靠 | 孤儿回复排空补发（按部件记进度，绝不重发已发部分）、失败/过期分流、inbox 原子认领、心跳 + 保活脚本（cron + hook 兜底拉起）、被顶号自动退出由保活拉起、回复积压告警、`npm run doctor` 自检 |
@@ -30,7 +30,7 @@ Muse 会照着 SKILL.md 自己走完：创建企业微信智能机器人、拿 B
 
 ## 准备工作
 
-**最省事：扫码建机器人（0.3.0）**。装好依赖后运行 `npm run build && npm run onboard`，终端会打出二维码（同时存一张 `onboard-qr.png`），用手机企业微信扫码、点「一键创建智能机器人」即可：
+**最省事：扫码建机器人**。装好依赖后运行 `npm run build && npm run onboard`，终端会打出二维码（同时存一张 `onboard-qr.png`），用手机企业微信扫码、点「一键创建智能机器人」即可：
 
 - Bot ID / Secret 自动写进 `secrets.env`（600，不在终端显示）；
 - 扫码接口拿不到扫码人的 userid，所以白名单为空时会生成一个 8 位**配对码**写进 `config.json`。daemon 启动后，在企业微信里**私聊**机器人发送这个配对码，你就自动进了白名单，配对码随即作废；配对前别人发消息只会收到"还没绑定主人"的提示；
@@ -61,7 +61,7 @@ chmod 600 secrets.env
 # 4. 配 config.json（已在 .gitignore 中）
 cp config.example.json config.json
 # allowedUserIds 填允许使用的企业微信 userid（通讯录"账号"栏）。
-# 0.2.0 起白名单 fail-closed：为空时 daemon 拒绝启动、check-config 失败；
+# 白名单 fail-closed：为空时 daemon 拒绝启动、check-config 失败；
 # 确实要对所有人开放，必须显式写 "allowAll": true（allowedUserIds 非空时以列表为准，allowAll 被忽略）。
 
 # 5. 编译
@@ -95,7 +95,7 @@ npm test
 
 ### 常驻运行（保活）
 
-同一 BotID 只允许**一条**长连接。0.2.1 起 daemon 启动时自己用 O_EXCL 创建 `daemon.lock`（同 ROOT 已有存活 daemon 则拒绝启动，
+同一 BotID 只允许**一条**长连接。daemon 启动时自己用 O_EXCL 创建 `daemon.lock`（同 ROOT 已有存活 daemon 则拒绝启动，
 已死进程留下的陈旧锁会被安全回收），并写 `daemon.pid`。两者内容都是一行 `<pid> <starttime> <token>`：starttime 是
 `/proc/<pid>/stat` 第 22 字段（防 pid 复用），token 是每次启动随机生成的令牌。`heartbeat.json` 为
 `{pid, ts, connected, token}`：启动即写一次 `connected:false`，认证成功后每 30 秒写 `connected:true`，断线时立即写一次 `connected:false` 并停止刷新。
@@ -119,7 +119,7 @@ bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开�
 bash keepalive.sh --uninstall-cron
 ```
 
-被顶号后 daemon 会主动退出、等保活拉起。此外（0.2.0）：
+被顶号后 daemon 会主动退出、等保活拉起。此外：
 
 - **hook 兜底拉起**：hook 每 5 秒轮询时顺便看心跳，超过 90 秒没更新就直接调用 `keepalive.sh`（最多每 2 分钟一次），不依赖 cron——Muse 虚拟机重启后 cron 不一定在
 - **静默断线**：SDK 每 30 秒发心跳，连续 2 次没收到回应就判定断线并自动重连
@@ -178,9 +178,9 @@ bash keepalive.sh --uninstall-cron
 | `send-file.mjs <userid> <文件>` | 发文件冒烟测试 |
 | `send-card-demo.mjs <userid>` | 发按钮交互卡片冒烟测试 |
 
-## 消息处理 hook 与多轮上下文（0.1.4）
+## 消息处理 hook 与多轮上下文
 
-`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 0.3.12 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题；发 `/compact`（可带重点）手动压缩，保留最近 2 轮原文、进行中的任务不受影响；发 `/stop` 立刻中断本会话进行中的任务（daemon 直接处理，旧回复不再发出，worker 每步检查自己的 `.claimed` 不在就停），之后直接发新指令。没有新消息时 hook 还会看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/一直连不上，keepalive 也没救回来）就唤醒 worker 去拉起、修复并报告，同一个故障每小时最多提醒一次。
+`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题；发 `/compact`（可带重点）手动压缩，保留最近 2 轮原文、进行中的任务不受影响；发 `/stop` 立刻中断本会话进行中的任务（daemon 直接处理，旧回复不再发出，worker 每步检查自己的 `.claimed` 不在就停），之后直接发新指令。没有新消息时 hook 还会看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/一直连不上，keepalive 也没救回来）就唤醒 worker 去拉起、修复并报告，同一个故障每小时最多提醒一次。
 
 ## 主动推送
 
@@ -202,7 +202,7 @@ daemon 认证成功时 + 每 60 秒排空一次（进程内互斥，不会并发
 用前先设置推送目标：`export WECOM_OWNER_USERID=你的企业微信userid`；ROOT 默认为脚本上一级目录，可用 `MUSE_WECOM_ROOT` 覆盖，
 DPMC CLI 路径可用 `DPMC_CLI` 覆盖。
 
-## 流式输出（打字机效果，0.2.0）
+## 流式输出（打字机效果）
 
 worker 写长回复时边写边往 `stream/<id>.jsonl` 追加，每次一整行 `{"text":"<这一段>"}`，各段原样拼接。daemon 把累计内容推到这条消息的企业微信流式消息上（同一 streamId 整体覆盖，每 3 秒最多刷新一次，照顾会话 30 条/分钟的限频）：
 
@@ -223,14 +223,13 @@ worker 写长回复时边写边往 `stream/<id>.jsonl` 追加，每次一整行 
 6. **两个 5 秒红线**：欢迎语必须在 `enter_chat` 后 5 秒内发出；卡片按钮回调后 5 秒内必须 `updateTemplateCard`。这两处不能走排队，daemon 里直接处理，文案预生成。
 7. **news_notice 卡片强制字段**：`card_action` 必填（缺了报 42045），`card_image.url` 必须真实可访问（缺了报 42044）。先拿 `button_interaction` 验证链路。
 8. **发出消息带 feedback.id**：企业微信只给带了 `feedback: {id}` 的消息显示点赞按钮并推送 `feedback_event`。长文本拆成多条时只在第一条带。
-8a. **流式是"整体覆盖"**：同一 streamId 的 `content` 每次都是全量覆盖，增量分块只会显示最后一块。0.2.0 起长文本拆成多条独立流式消息（各自 streamId、`finish=true`），单条 ≤20000 字节（上限 20480）。
+8a. **流式是"整体覆盖"**：同一 streamId 的 `content` 每次都是全量覆盖，增量分块只会显示最后一块。长文本拆成多条独立流式消息（各自 streamId、`finish=true`），单条 ≤20000 字节（上限 20480）。
 9. **点赞自动回复别用 text 类型**：`sendMessage` 走 `aibot_respond_msg` 通道时 `msgtype: "text"` 会被 40008 打回，用 `markdown`。
 10. **SDK 类型不可全信**：拿真实 payload 转储说话（如 `event.template_card_event.{event_key,task_id}`、`event.feedback_event.{id,type}`）。
 11. **保活别误杀刚启动的进程**：keepalive 对 90 秒内的新进程给宽限期；心跳只在认证成功后写。
-12. **被顶号 = 僵尸**：SDK 收到 `disconnected_event` 后永不重连。0.2.0 起 daemon 写 `kicked.json` 后约 1.5 秒退出（exit 1），由 keepalive 拉起，重连成功后通知主人。注意：如果是你自己用 send-*.mjs 顶的号，保活下次运行会把 daemon 拉回来。
+12. **被顶号 = 僵尸**：SDK 收到 `disconnected_event` 后永不重连。daemon 写 `kicked.json` 后约 1.5 秒退出（exit 1），由 keepalive 拉起，重连成功后通知主人。注意：如果是你自己用 send-*.mjs 顶的号，保活下次运行会把 daemon 拉回来。
 13. **识别进程靠 pid 文件**：不再用 pgrep 匹配路径，`npm start`（相对路径）和绝对路径启动都能被 keepalive 正确识别。
-14. **0.2.1 升级注意**：`daemon.pid` 格式变了（旧格式只有 pid，不再被信任）。从 0.2.0 升级时先停掉旧 daemon 再启动新版；
-    旧 daemon 不写 `daemon.lock`，新版无法感知它。`daemon.lock` 残留（例如 `kill -9`）无需手动删除，下次启动会自动回收。
+14. **锁文件残留**：`daemon.lock` 残留（例如 `kill -9`）无需手动删除，下次启动会自动回收。
 15. **回复投递状态**：`outbox/`（待发）→ `inflight/`（发送中）→ `sent/` / `failed/` / `expired/`。daemon 崩溃后重启会把 `inflight/`
     里的回复移回 `outbox/` 续发（已发的部分不重发）；超时后才到的回复进 `expired/`，发了一半被超时打断的会有 `expired/<id>.partial.json`。
 16. **硬链接的文件发不出去**：外发文件有多个硬链接（`nlink > 1`）会被拒绝（防止 `ln secrets.env /tmp/x.txt` 绕过），请复制一份再发。
@@ -258,8 +257,8 @@ muse-wecom-bridge/
 │   ├── muse-backend.ts      # inbox 入队 / 等 outbox 回复
 │   ├── files.ts             # 外发文件安全校验、媒体类型识别
 │   ├── state.ts             # 去重水位、心跳、卡片登记表、卡片回调去重、pid 文件
-│   ├── proc.ts              # 进程身份：/proc/<pid>/stat starttime、启动令牌（0.2.1）
-│   ├── lock.ts              # daemon 单实例锁 daemon.lock（O_EXCL + 陈旧锁回收，0.2.1）
+│   ├── proc.ts              # 进程身份：/proc/<pid>/stat starttime、启动令牌
+│   ├── lock.ts              # daemon 单实例锁 daemon.lock（O_EXCL + 陈旧锁回收）
 │   ├── config.ts / paths.ts / chunk.ts / logger.ts / fsutil.ts
 │   ├── test/                # node --test 离线测试（假客户端，不连网）
 │   ├── wecom-morning-brief.py # DPMC 早报生成（主动推送示例）
