@@ -108,6 +108,19 @@ function safeIdPart(s: string): string {
   return s.replace(/[^A-Za-z0-9_@.-]/g, "_").slice(0, 80);
 }
 
+/** 会话键 → stop/ 下的文件名（只留安全字符，被替换过就加短哈希；与 hook 的 key_of 相同） */
+export function stopFileName(chatKey: string): string {
+  const c = chatKey || "unknown";
+  let k = c.replace(/[^A-Za-z0-9_-]/g, "_");
+  if (k !== c) k += "_" + createHash("md5").update(c).digest("hex").slice(0, 8);
+  return `${k}.json`;
+}
+
+/** 整条消息就是 /stop（前面可以带 @机器人 等 @）；句子里顺带提到不算 */
+export function isStopCommand(text: string): boolean {
+  return /^(?:@\S+\s+)*\/stop\s*$/i.test((text || "").trim());
+}
+
 /** 用户引用某条消息时，把被引用的原文拼进 inbox，回复能接得上话 */
 export function extractQuote(body: { quote?: { msgtype?: unknown; text?: { content?: unknown } } } | undefined): string {
   const q = body?.quote;
@@ -187,6 +200,8 @@ export function createBridge(d: BridgeDeps) {
 
   /** 正在等待/发送回复的消息 ID。排空时跳过这些；直到归档/失败完成才移除（finally）。 */
   const activeWaits = new Set<string>();
+  /** 正在等回复的消息 → 会话键（/stop 按会话找要中断的） */
+  const waitChats = new Map<string, string>();
 
   // ------------------------------------------------------------ 发送原语
 
@@ -292,12 +307,17 @@ export function createBridge(d: BridgeDeps) {
 
   // ------------------------------------------------------------ 回复流程
 
-  type DeliverOutcome = DeliveryResult | { status: "timeout" };
+  type DeliverOutcome = DeliveryResult | { status: "timeout" } | { status: "stopped" };
 
   async function deliverReply(frame: Frame, msgid: string, chatKey: string): Promise<DeliverOutcome> {
     activeWaits.add(msgid);
+    waitChats.set(msgid, chatKey);
     try {
       const reply = await backend.waitReply(msgid);
+      if (reply === null && backend.wasStopped(msgid)) {
+        log("daemon.reply_stopped", { msgid });
+        return { status: "stopped" };
+      }
       if (reply === null) {
         // 写墓碑：之后迟到的 outbox 文件会被排空移到 expired/，不再主动补发过时回复
         const owner = await outbox.tombstone(msgid).catch((e) => {
@@ -313,7 +333,38 @@ export function createBridge(d: BridgeDeps) {
       return res;
     } finally {
       activeWaits.delete(msgid);
+      waitChats.delete(msgid);
     }
+  }
+
+  /**
+   * /stop：中断本会话里所有还在等回复的消息（daemon 收到就处理，不进 inbox、不等 hook 轮询）。
+   *   - inbox 文件（未认领 / 已认领）移到 expired/，留 <id>.stopped；等待立即结束，不发"超时"提示；
+   *   - 写墓碑：worker 之后才写出的回复、正在分段发送的回复都不再发出；
+   *   - 写 stop/<会话>.json {chatId, at, messageId, cancelled}；回用户一句。
+   */
+  async function handleStop(frame: Frame, msgid: string, chatKey: string): Promise<void> {
+    const at = new Date().toISOString();
+    const cancelled: string[] = [];
+    for (const [mid, ck] of [...waitChats]) {
+      if (ck !== chatKey || mid === msgid || outbox.hasTombstone(mid)) continue;
+      await backend.stop(mid, at, paths.expired).catch((e) => log("daemon.stop_error", { msgid: mid, error: errText(e) }));
+      await outbox.tombstone(mid).catch((e) => log("daemon.tombstone_error", { msgid: mid, error: errText(e) }));
+      cancelled.push(mid);
+    }
+    try {
+      await mkdir(paths.stop, { recursive: true });
+      await atomicWriteJson(join(paths.stop, stopFileName(chatKey)), { chatId: chatKey, at, messageId: msgid, cancelled });
+    } catch (e) {
+      log("daemon.stop_write_failed", { msgid, error: errText(e) });
+    }
+    log("daemon.stop", { msgid, chatKey, cancelled });
+    await replyStreamText(
+      frame,
+      cancelled.length
+        ? `已停止 ${cancelled.length} 个进行中的任务，它的回复不会再发出。\n已经执行完的步骤撤不回来；直接发新指令就行。`
+        : "现在没有进行中的任务。直接发新指令就行。",
+    ).catch(() => undefined);
   }
 
   /** 8 秒内正式回复没来，先发一条"收到，正在处理"。 */
@@ -356,6 +407,10 @@ export function createBridge(d: BridgeDeps) {
       return null;
     }
     if (!text) return null;
+    if (!isVoice && isStopCommand(text)) {
+      await handleStop(frame, msgid, chatId);
+      return null;
+    }
 
     const quoteCtx = extractQuote(body);
     const item: InboxItem = {
@@ -623,6 +678,7 @@ export function createBridge(d: BridgeDeps) {
       sent: await pruneOldFiles(paths.sent, 30 * DAY, now),
       expired: await pruneOldFiles(paths.expired, 30 * DAY, now),
       failed: await pruneOldFiles(paths.failed, 30 * DAY, now),
+      stop: await pruneOldFiles(paths.stop, 7 * DAY, now),
     };
     if (Object.values(res).some((n) => n > 0)) log("daemon.pruned", res);
     return res;

@@ -145,9 +145,9 @@ bash keepalive.sh --status   # 只检查，健康 exit 0 / 不健康 exit 1
 | `send-file.mjs <userid> <文件>` | 发文件冒烟测试 |
 | `send-card-demo.mjs <userid>` | 发按钮交互卡片冒烟测试 |
 
-## 消息处理 hook 与多轮上下文（0.1.3）
+## 消息处理 hook 与多轮上下文（0.1.4）
 
-`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 0.3.11 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题。
+`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 0.3.12 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题；发 `/stop` 立刻中断本会话进行中的任务（daemon 直接处理，旧回复不再发出，worker 每步检查自己的 `.claimed` 不在就停），之后直接发新指令。
 
 ## 主动推送
 

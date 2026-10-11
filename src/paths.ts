@@ -25,6 +25,8 @@ export interface Paths {
   sent: string;
   failed: string;
   expired: string;
+  /** /stop 标记：stop/<会话>.json */
+  stop: string;
   /** 0.2.1：正在发送的回复（outbox → inflight 认领） */
   inflight: string;
   progress: string;
@@ -59,6 +61,7 @@ export function makePaths(root: string): Paths {
     sent: join(r, "sent"),
     failed: join(r, "failed"),
     expired: join(r, "expired"),
+    stop: join(r, "stop"),
     inflight: join(r, "inflight"),
     progress: join(r, "progress"),
     incoming: join(r, "incoming"),

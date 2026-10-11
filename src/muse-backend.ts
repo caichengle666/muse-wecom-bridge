@@ -112,6 +112,39 @@ export class MuseBackend {
    * 而是继续轮询（只记一次日志）——worker 可能正在非原子地写，或稍后会改正；
    * 到超时仍无合法 JSON 就按超时处理（返回 null）。
    */
+  /** /stop 中断的消息：waitReply 看到就立刻返回 null（不当超时处理，见 wasStopped） */
+  private readonly stopped = new Set<string>();
+
+  wasStopped(messageId: string): boolean {
+    return this.stopped.has(messageId);
+  }
+
+  /**
+   * /stop：把这条的 inbox 文件（未认领 <id>.json 或已认领 <id>.json.claimed）原子移到
+   * <expiredDir>/<id>.inbox.json，写 <expiredDir>/<id>.stopped（hook 据此记"被中断"一轮），
+   * 并让正在进行的 waitReply 立即结束。返回原状态；两个文件都不在返回 null。
+   */
+  async stop(messageId: string, at: string, expiredDir: string): Promise<"unclaimed" | "claimed" | null> {
+    this.stopped.add(messageId);
+    if (this.stopped.size > 5000) this.stopped.delete(this.stopped.values().next().value as string);
+    await mkdir(expiredDir, { recursive: true });
+    const src = join(this.dirs.inbox, `${messageId}.json`);
+    let state: "unclaimed" | "claimed" | null = null;
+    for (const [p, st] of [[src, "unclaimed"], [`${src}.claimed`, "claimed"]] as const) {
+      try {
+        await rename(p, join(expiredDir, `${messageId}.inbox.json`));
+        state = st;
+        break;
+      } catch {
+        /* 不在 / 刚被认领，试下一个 */
+      }
+    }
+    const tmp = join(expiredDir, `${messageId}.stopped.tmp`);
+    await writeFile(tmp, JSON.stringify({ at, state }), "utf8");
+    await rename(tmp, join(expiredDir, `${messageId}.stopped`));
+    return state;
+  }
+
   async waitReply(messageId: string): Promise<ReplyResult | null> {
     const deadline = Date.now() + this.replyTimeoutMs;
     const path = join(this.dirs.outbox, `${messageId}.json`);
@@ -120,6 +153,7 @@ export class MuseBackend {
     const alt = [this.dirs.inflight, this.dirs.sent].filter((d): d is string => !!d).map((d) => join(d, `${messageId}.json`));
     let parseErrorLogged = false;
     while (Date.now() < deadline) {
+      if (this.stopped.has(messageId)) return null;
       let raw: string | null = null;
       for (const p of [path, ...alt]) {
         try {
