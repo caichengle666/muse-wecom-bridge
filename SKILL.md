@@ -12,14 +12,14 @@
 
 - Node.js 20.10+（`npm test` 用到 `node --test --test-concurrency`）
 - 一个企业微信**智能机器人**（API 模式 + 长连接）：`npm run onboard` 扫码自动建，或手动建后拿 BotID 和 Secret
-- 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）
+- 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）；`allowedChatIds` 里的授权群所有成员也能用（主人在群里发 `/授权本群` 添加）
 
 ## 部署前先问用户（必须等回答再往下走）
 
 开始装之前，把下面几个选择**一条消息**发给用户，每项写明推荐项；用户回「默认」就全用推荐值。**用户没回答前不要执行任何安装命令**，选完把结果写进 `config.json` 再继续：
 
 1. **创建方式**：A 扫码新建机器人（推荐，凭证自动写好）；B 已有智能机器人，用户提供 Bot ID / Secret（扫码只能新建，不能接管已有的）
-2. **谁能用**：A 只有用户自己，扫码后用配对码绑定（推荐）；B 机器人可见范围内的人都能用（`allowAll: true`，所有人的消息都会交给 Muse 处理，慎选）
+2. **谁能用**：A 只有用户自己，扫码后用配对码绑定（推荐）；B 用户自己 + 指定群里的所有人：先按 A 配对，再由用户在要开放的群里发 `@机器人 /授权本群`（`/取消授权本群` 撤销，写进 `allowedChatIds`）；C 机器人可见范围内的人都能用（`allowAll: true`，所有人的消息都会交给 Muse 处理，慎选）
 3. **流式回复**：A 开，长回复边写边显示（推荐）；B 关，写完一次发出（`streamReplies: false`）
 4. **开机自启保活**：A 装 cron（推荐，`keepalive.sh --install-cron`）；B 不装，只靠 hook 兜底拉起
 
@@ -90,7 +90,8 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `wecom-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
 - `/compact [重点]`（群里 `@机器人 /compact` 也行）：手动压缩，这条本身不进历史；上下文带 `compact: true`、`compact_hint`、`size_bytes`，并强制 `compress_needed: true`，worker 把 summary 和除最近 2 轮外的带 seq 的轮压成摘要，照常写 `wecom-ctx-<ctx_key>.summary.json`；还在处理中的任务（没 seq 的）不动，回复后照常入历史
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
-- 单聊和每个群各自一份；群里多人说话时不区分是谁
+- 单聊和每个群各自一份；群里多人共用一份，每轮用户消息带 `from`（说话人 userid，旧历史没有），上下文里的 turns 也带 `from`，新消息的说话人看 claimed 文件的 `senderUserId`；单聊没有 `from`
+- 群授权：主人在群里发 `@机器人 /授权本群`（`/allowgroup`）/ `/取消授权本群`（`/disallowgroup`），daemon 直接改 `config.json` 的 `allowedChatIds`、立即生效，不进 inbox；非主人发会被拒。没授权的群 @机器人 时 `debug.log` 的 `daemon.blocked_not_allowed` 带 `chatId`
 
 ## 流式输出（打字机效果）
 

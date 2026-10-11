@@ -1,5 +1,6 @@
 {
   "allowedUserIds": ["你的企业微信userid"],
+  "allowedChatIds": [],
   "allowAll": false,
   "replyTimeoutMin": 20,
   "wsUrl": "wss://openws.work.weixin.qq.com",

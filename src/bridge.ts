@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { MuseBackend, InboxItem } from "./muse-backend.js";
 import type { BridgeConfig } from "./config.js";
-import { cleanUserIds, makeIsAllowed, pairingPending } from "./config.js";
+import { cleanIds, cleanUserIds, makeIsAllowed, pairingPending } from "./config.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./logger.js";
 import { CardEventDedupe, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
@@ -123,6 +123,13 @@ export function stopFileName(chatKey: string): string {
 /** 整条消息就是 /stop（前面可以带 @机器人 等 @）；句子里顺带提到不算 */
 export function isStopCommand(text: string): boolean {
   return /^(?:@\S+\s+)*\/stop\s*$/i.test((text || "").trim());
+}
+
+/** 整条消息是 /授权本群（/allowgroup）或 /取消授权本群（/disallowgroup），前面可以带 @机器人 */
+export function groupBindCommand(text: string): "allow" | "disallow" | null {
+  const m = /^(?:@\S+\s+)*\/(授权本群|allowgroup|取消授权本群|disallowgroup)\s*$/i.exec((text || "").trim());
+  if (!m) return null;
+  return /^(授权本群|allowgroup)$/i.test(m[1]) ? "allow" : "disallow";
 }
 
 /** 用户引用某条消息时，把被引用的原文拼进 inbox，回复能接得上话 */
@@ -522,33 +529,69 @@ export function createBridge(d: BridgeDeps) {
     return true;
   }
 
+  /** 消息的发送人、会话类型、会话键 */
+  function whoOf(body: Frame["body"]): { sender: string; chatType: string; chatId: string } {
+    return { sender: String(body?.from?.userid || ""), chatType: String(body?.chattype || "single"), chatId: chatKeyOf(body) };
+  }
+
+  /** 白名单判定 + 拦截日志（带 chatId：没授权的群 @ 机器人时，从日志里找它的 chatid） */
+  function blocked(w: { sender: string; chatType: string; chatId: string }, extra: Record<string, unknown> = {}): boolean {
+    if (isAllowed(w.sender, w.chatType, w.chatId)) return false;
+    log("daemon.blocked_not_allowed", { ...extra, sender: w.sender, chatType: w.chatType, chatId: w.chatId });
+    return true;
+  }
+
+  /**
+   * 改写 config.json：以磁盘上的为准（不覆盖手改过的其它项），mutate 返回 false 表示不用写；原子写入。
+   * 串行执行：同时到的配对 / 授权命令不会读到同一份旧文件、互相覆盖。
+   */
+  let configChain: Promise<unknown> = Promise.resolve();
+  function saveConfig(mutate: (disk: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
+    const run = async () => {
+      let disk: Record<string, unknown>;
+      try {
+        disk = existsSync(paths.config) ? (JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>) : {};
+      } catch (e) {
+        throw Object.assign(new Error(`config.json 读不出来：${errText(e)}`), { hint: "读不出来" });
+      }
+      if (mutate(disk)) {
+        try {
+          await atomicWriteJson(paths.config, disk);
+        } catch (e) {
+          throw Object.assign(new Error(`config.json 写不进去：${errText(e)}`), { hint: "写不进去" });
+        }
+      }
+      return disk;
+    };
+    const p = configChain.then(run, run);
+    configChain = p.catch(() => undefined);
+    return p;
+  }
+  const saveHint = (e: unknown) => (e as { hint?: string }).hint || "写不进去";
+
   /**
    * 配对：白名单为空时，第一个私聊发出正确配对码的人成为主人。
    * 配对码在第一个 await 之前就从内存里拿掉：同时到的第二条发码消息不会再通过 pairingPending。
-   * 写回 config.json：以磁盘上的为准，把发码人并进已有的 allowedUserIds、删掉 pairCode；写失败就把配对码放回去。
+   * 写回 config.json：把发码人并进磁盘上已有的 allowedUserIds、删掉 pairCode；写失败就把配对码放回去。
    */
   async function claimOwner(frame: Frame, userid: string): Promise<void> {
     const code = config.pairCode;
     delete config.pairCode;
-    const fail = async (text: string, e: unknown) => {
+    let ids: string[] = [];
+    try {
+      await saveConfig((disk) => {
+        ids = cleanUserIds(disk.allowedUserIds);
+        if (!ids.includes(userid)) ids.push(userid);
+        delete disk.pairCode;
+        disk.allowedUserIds = ids;
+        return true;
+      });
+    } catch (e) {
       log("daemon.pair_error", { error: errText(e) });
       if (config.pairCode === undefined && !(config.allowedUserIds || []).length) config.pairCode = code;
-      await replyStreamText(frame, text).catch(() => undefined);
-    };
-    let disk: Record<string, unknown> = {};
-    try {
-      disk = existsSync(paths.config) ? (JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>) : {};
-    } catch (e) {
-      return fail("配对失败：config.json 读不出来，修好后重启 daemon 再发一次配对码。", e);
-    }
-    const ids = cleanUserIds(disk.allowedUserIds);
-    if (!ids.includes(userid)) ids.push(userid);
-    delete disk.pairCode;
-    disk.allowedUserIds = ids;
-    try {
-      await atomicWriteJson(paths.config, disk);
-    } catch (e) {
-      return fail("配对失败：config.json 写不进去，检查权限后再发一次配对码。", e);
+      const h = saveHint(e);
+      await replyStreamText(frame, `配对失败：config.json ${h}，${h === "读不出来" ? "修好后重启 daemon 再发一次配对码" : "检查权限后再发一次配对码"}。`).catch(() => undefined);
+      return;
     }
     config.allowedUserIds = ids;
     isAllowed = makeIsAllowed(config);
@@ -556,17 +599,55 @@ export function createBridge(d: BridgeDeps) {
     await replyStreamText(frame, `配对成功，你（${userid}）现在是这个机器人的主人，直接发消息就行。`).catch(() => undefined);
   }
 
+  /** /授权本群、/取消授权本群：只有主人（allowedUserIds 里的人）能在群里用；daemon 直接处理，不进 inbox。 */
+  async function handleGroupBind(frame: Frame, msgid: string, w: { sender: string; chatType: string; chatId: string }, op: "allow" | "disallow"): Promise<void> {
+    const say = (text: string) => replyStreamText(frame, text).catch(() => undefined);
+    if (!cleanUserIds(config.allowedUserIds).includes(w.sender)) {
+      log("daemon.group_bind_refused", { msgid, op, sender: w.sender, chatType: w.chatType, chatId: w.chatId });
+      await say("抱歉，只有机器人的主人能授权或取消授权群。");
+      return;
+    }
+    if (w.chatType !== "group" || !w.chatId) {
+      await say("这个命令要在群里 @我 发送。");
+      return;
+    }
+    let changed = false;
+    let disk: Record<string, unknown>;
+    try {
+      disk = await saveConfig((d) => {
+        const list = cleanIds(d.allowedChatIds);
+        const has = list.includes(w.chatId);
+        changed = op === "allow" ? !has : has;
+        if (changed) d.allowedChatIds = op === "allow" ? [...list, w.chatId] : list.filter((x) => x !== w.chatId);
+        return changed;
+      });
+    } catch (e) {
+      log("daemon.group_bind_error", { msgid, op, chatId: w.chatId, error: errText(e) });
+      await say(`操作失败：config.json ${saveHint(e)}，检查后再发一次。`);
+      return;
+    }
+    config.allowedChatIds = cleanIds(disk.allowedChatIds);
+    isAllowed = makeIsAllowed(config);
+    log(op === "allow" ? "daemon.group_allowed" : "daemon.group_disallowed", { msgid, chatId: w.chatId, by: w.sender, changed });
+    if (op === "allow") await say(changed ? "已授权本群：群里所有成员 @我 都能使用。" : "本群已经授权过了，群里所有成员 @我 都能使用。");
+    else await say(changed ? "已取消本群授权：之后群里只有主人 @我 才会回复。" : "本群本来就没有授权，不用取消。");
+  }
+
   async function handleText(frame: Frame, textOverride?: string, isVoice?: boolean): Promise<DeliverOutcome | null> {
     const body = frame.body || {};
     const msgid = String(body.msgid || "");
     if (!(await firstSeen(msgid))) return null;
-    const sender = String(body.from?.userid || "");
-    const chatType = String(body.chattype || "single");
-    const chatId = chatKeyOf(body);
+    const w = whoOf(body);
+    const { sender, chatType, chatId } = w;
     const text = (textOverride ?? String(body.text?.content || "")).trim();
     log("daemon.msg", { msgid, sender, chatType, len: text.length, ...(logText ? { text: text.slice(0, 300) } : {}) });
 
-    if (!isAllowed(sender)) {
+    const bind = isVoice ? null : groupBindCommand(text);
+    if (bind) {
+      await handleGroupBind(frame, msgid, w, bind);
+      return null;
+    }
+    if (!isAllowed(sender, chatType, chatId)) {
       if (pairingPending(config)) {
         if (chatType === "single" && text.toUpperCase() === config.pairCode) {
           await claimOwner(frame, sender);
@@ -576,7 +657,7 @@ export function createBridge(d: BridgeDeps) {
         await replyStreamText(frame, "这个机器人还没绑定主人：私聊发送 npm run onboard 时终端显示的 8 位配对码。").catch(() => undefined);
         return null;
       }
-      log("daemon.blocked_not_allowed", { msgid, sender });
+      blocked(w, { msgid });
       await replyStreamText(frame, "抱歉，这个机器人只服务它的主人。").catch(() => undefined);
       return null;
     }
@@ -607,11 +688,7 @@ export function createBridge(d: BridgeDeps) {
     if (transcribed) return handleText(frame, transcribed, true);
     const msgid = String(body.msgid || "");
     if (!(await firstSeen(msgid))) return null;
-    const sender = String(body.from?.userid || "");
-    if (!isAllowed(sender)) {
-      log("daemon.blocked_not_allowed", { msgid, sender, kind: "voice" });
-      return null;
-    }
+    if (blocked(whoOf(body), { msgid, kind: "voice" })) return null;
     await replyStreamText(frame, "没听清，再说一遍？").catch(() => undefined);
     return null;
   }
@@ -620,11 +697,7 @@ export function createBridge(d: BridgeDeps) {
     const body = frame.body || {};
     const msgid = String(body.msgid || "");
     if (!(await firstSeen(msgid))) return;
-    const sender = String(body.from?.userid || "");
-    if (!isAllowed(sender)) {
-      log("daemon.blocked_not_allowed", { msgid, sender, kind: "mixed" });
-      return;
-    }
+    if (blocked(whoOf(body), { msgid, kind: "mixed" })) return;
     await replyStreamText(frame, "图文混排的消息我还看不太懂，分开发送试试。").catch(() => undefined);
   }
 
@@ -649,13 +722,9 @@ export function createBridge(d: BridgeDeps) {
     const body = frame.body || {};
     const msgid = String(body.msgid || "");
     if (!(await firstSeen(msgid))) return null;
-    const sender = String(body.from?.userid || "");
-    const chatType = String(body.chattype || "single");
-    const chatId = chatKeyOf(body);
-    if (!isAllowed(sender)) {
-      log("daemon.blocked_not_allowed", { msgid, sender, kind });
-      return null;
-    }
+    const w = whoOf(body);
+    const { sender, chatType, chatId } = w;
+    if (blocked(w, { msgid, kind })) return null;
     const media = body[kind] || {};
     const url = String(media.url || "");
     const saved = url ? await downloadIncoming(msgid, url, media.aeskey ? String(media.aeskey) : undefined) : null;
@@ -681,12 +750,9 @@ export function createBridge(d: BridgeDeps) {
   // ------------------------------------------------------------ 事件
 
   async function onEnterChat(frame: Frame): Promise<void> {
-    const from = String(frame.body?.from?.userid || "");
-    log("daemon.enter_chat", { from });
-    if (!isAllowed(from)) {
-      log("daemon.blocked_not_allowed", { sender: from, kind: "enter_chat" });
-      return;
-    }
+    const w = whoOf(frame.body);
+    log("daemon.enter_chat", { from: w.sender });
+    if (blocked(w, { kind: "enter_chat" })) return;
     await client
       .replyWelcome(frame, { msgtype: "text", text: { content: WELCOME_TEXT } })
       .catch((e) => log("daemon.welcome_error", { error: errText(e) }));
@@ -700,10 +766,7 @@ export function createBridge(d: BridgeDeps) {
     await mkdir(paths.feedbackRaw, { recursive: true })
       .then(() => writeFile(join(paths.feedbackRaw, `${Date.now()}.json`), JSON.stringify(body, null, 2)))
       .catch(() => undefined);
-    if (!isAllowed(from)) {
-      log("daemon.blocked_not_allowed", { sender: from, kind: "feedback" });
-      return;
-    }
+    if (blocked(whoOf(body), { kind: "feedback" })) return;
     // 真实 payload：event.feedback_event.{id,type}；type 1=👍 2=👎（3 待确认）
     const fb = ev.feedback_event || ev.feedback || ev.data || {};
     const ftype: unknown = fb.type ?? fb.feedback_type ?? ev.type;
@@ -731,10 +794,7 @@ export function createBridge(d: BridgeDeps) {
     const from = String(body.from?.userid || "");
     const chatKey = chatKeyOf(body);
     log("daemon.card_event", { eventKey, taskId, from, chatKey });
-    if (!isAllowed(from)) {
-      log("daemon.blocked_not_allowed", { sender: from, kind: "card_event" });
-      return;
-    }
+    if (blocked(whoOf(body), { kind: "card_event" })) return;
     if (!taskId) taskId = cards.lastTaskFor(chatKey);
     const rec = taskId ? cards.get(taskId) : undefined;
     const fallbackType = String(inner.card_type || ev.card_type || "button_interaction");

@@ -56,6 +56,10 @@ if [ -f config.json ]; then
     elif [ "$(jq -r '.allowAll // false' config.json)" = "true" ]; then warn "allowAll=true：所有人都能用这个机器人"
     elif jq -e '.pairCode | type == "string" and test("^[A-HJ-NP-Z2-9]{8}$")' config.json >/dev/null 2>&1; then warn "白名单等待配对：在企业微信里私聊机器人发送 config.json 里的 pairCode"
     else fail "config.json 的 allowedUserIds 为空（daemon 会拒绝启动）"; fi
+    gbad="$(jq '[.allowedChatIds // [] | .[] | select(type != "string" or test("^\\s*$") or test("^\\s|\\s$"))] | length' config.json 2>/dev/null || echo 1)"
+    gn="$(jq '[.allowedChatIds // [] | .[] | select(type == "string" and (test("^\\s*$") or test("^\\s|\\s$") | not))] | unique | length' config.json 2>/dev/null || echo 0)"
+    if [ "${gbad:-0}" -gt 0 ]; then fail "config.json 的 allowedChatIds 里有 $gbad 个无效 chatid（空白或前后有空格）：daemon 会拒绝启动"
+    else ok "授权群 ${gn:-0} 个（群里所有成员 @机器人 都能用；主人在群里发 /授权本群 添加）"; fi
     [ "$(jq -r '.streamReplies // true' config.json)" = "false" ] && warn "streamReplies=false：流式打字机已关闭"
   else
     fail "config.json 不是合法 JSON"

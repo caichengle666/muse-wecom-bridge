@@ -120,8 +120,8 @@ test("#9 白名单：示例占位、前后带空格的 userid 校验报错；判
   assert.match(validateConfig({ allowedUserIds: [" alice"] }).errors.join(), /前后有空格/);
   assert.match(validateConfig({ allowedUserIds: ["   "] }).errors.join(), /非空字符串数组/);
   assert.deepEqual(validateConfig({ allowedUserIds: ["alice"] }).errors, []);
-  assert.ok(makeIsAllowed({ allowedUserIds: [" alice "] })("alice"));
-  assert.ok(!makeIsAllowed({ allowedUserIds: [EXAMPLE_USERID] })(EXAMPLE_USERID));
+  assert.ok(makeIsAllowed({ allowedUserIds: [" alice "] })("alice", "single", "alice"));
+  assert.ok(!makeIsAllowed({ allowedUserIds: [EXAMPLE_USERID] })(EXAMPLE_USERID, "single", EXAMPLE_USERID));
 });
 
 test("代理选择：HTTPS_PROXY 生效、NO_PROXY 命中直连、config 可强制 off / 覆盖；配置校验拒绝非法 proxy", async () => {

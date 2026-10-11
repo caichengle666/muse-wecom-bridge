@@ -12,6 +12,11 @@ export interface BridgeConfig {
    * 0.2.0 起 fail-closed：为空时 daemon 拒绝启动，除非显式设置 allowAll: true。
    */
   allowedUserIds?: string[];
+  /**
+   * 授权群的 chatid：这些群里所有成员 @机器人 都能用（私聊和别的群不受影响）。
+   * 主人在群里发「/授权本群」「/取消授权本群」维护；必须先有主人（allowedUserIds 非空）才生效。
+   */
+  allowedChatIds?: string[];
   /** 显式放开给所有人（仅当 allowedUserIds 为空时生效；不推荐）。 */
   allowAll?: boolean;
   /**
@@ -88,7 +93,16 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
       if (spaced.length) errors.push(`allowedUserIds 里的 userid 前后有空格：${spaced.map((x) => JSON.stringify(x)).join("、")}`);
     }
   }
+  const chats = cfg.allowedChatIds;
+  if (chats !== undefined) {
+    if (!Array.isArray(chats) || chats.some((x) => typeof x !== "string" || !x.trim())) {
+      errors.push("allowedChatIds 必须是非空字符串数组");
+    } else if (chats.some((x) => x !== x.trim())) {
+      errors.push("allowedChatIds 里的 chatid 前后有空格");
+    }
+  }
   const list = cleanUserIds(ids);
+  const groups = cleanIds(chats);
   if (cfg.allowAll !== undefined && typeof cfg.allowAll !== "boolean") {
     errors.push("allowAll 必须是 true/false");
   }
@@ -98,9 +112,11 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   if (!list.length && cfg.allowAll !== true && !pairing) {
     errors.push(
       '白名单为空：请在 config.json 的 allowedUserIds 填入允许使用的企业微信 userid；' +
-        '确实要对所有人开放，需显式设置 "allowAll": true',
+        '确实要对所有人开放，需显式设置 "allowAll": true' +
+        (groups.length ? "（allowedChatIds 只放行群，还必须有主人）" : ""),
     );
   }
+  if (!list.length && pairing && groups.length) warnings.push("配对完成前 allowedChatIds 不生效");
   if (list.length && cfg.allowAll === true) {
     warnings.push("allowedUserIds 非空时以白名单为准，allowAll 被忽略");
   }
@@ -133,15 +149,20 @@ export function newPairCode(): string {
 /** config.example.json 里的占位 userid */
 export const EXAMPLE_USERID = "你的企业微信userid";
 
-/** 白名单里真正可用的 userid：字符串、去掉首尾空白后非空、不是示例占位；去重 */
-export function cleanUserIds(v: unknown): string[] {
+/** 列表里真正可用的 id：字符串、去掉首尾空白后非空；去重 */
+export function cleanIds(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
   for (const x of v) {
     const t = typeof x === "string" ? x.trim() : "";
-    if (t && t !== EXAMPLE_USERID && !out.includes(t)) out.push(t);
+    if (t && !out.includes(t)) out.push(t);
   }
   return out;
+}
+
+/** 白名单里真正可用的 userid：同 cleanIds，再去掉示例占位 */
+export function cleanUserIds(v: unknown): string[] {
+  return cleanIds(v).filter((x) => x !== EXAMPLE_USERID);
 }
 
 /** 配对是否在等待中：白名单为空、未 allowAll、配对码有效。 */
@@ -149,10 +170,16 @@ export function pairingPending(cfg: BridgeConfig): boolean {
   return !cleanUserIds(cfg.allowedUserIds).length && cfg.allowAll !== true && isValidPairCode(cfg.pairCode);
 }
 
-/** 白名单判定：列表非空 → 只认列表；列表为空 → 仅当 allowAll === true 放行。 */
-export function makeIsAllowed(cfg: BridgeConfig): (userid: string) => boolean {
+export type IsAllowed = (userid: string, chatType: string, chatId: string) => boolean;
+
+/**
+ * 白名单判定：列表非空 → 列表里的人，或授权群（allowedChatIds）里的任何人；
+ * 列表为空 → 仅当 allowAll === true 放行（没有主人时授权群不生效）。
+ */
+export function makeIsAllowed(cfg: BridgeConfig): IsAllowed {
   const list = new Set(cleanUserIds(cfg.allowedUserIds));
-  if (list.size > 0) return (u) => list.has(u);
+  const groups = new Set(cleanIds(cfg.allowedChatIds));
+  if (list.size > 0) return (u, type, chat) => list.has(u) || (type === "group" && groups.has(chat));
   if (cfg.allowAll === true) return () => true;
   return () => false;
 }

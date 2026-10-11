@@ -34,6 +34,7 @@ Muse 会照着 SKILL.md 自己走完：创建企业微信智能机器人、拿 B
 
 - Bot ID / Secret 自动写进 `secrets.env`（600，不在终端显示）；
 - 扫码接口拿不到扫码人的 userid，所以白名单为空时会生成一个 8 位**配对码**写进 `config.json`。daemon 启动后，在企业微信里**私聊**机器人发送这个配对码，你就自动进了白名单，配对码随即作废；配对前别人发消息只会收到"还没绑定主人"的提示；
+- 想让某个群里的同事也能用：主人在那个群里发 `@机器人 /授权本群`，群里所有人 @机器人 都能用（见下文「授权群」）；
 - 只能新建机器人。这个扫码接口是企业微信官方 CLI（`@wecom/wecom-openclaw-cli`）在用的，没写进开发者文档，哪天失效就按下面手动建。
 
 手动建：
@@ -83,6 +84,7 @@ npm test
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `allowedUserIds` | （必填） | 允许对话的 userid 列表；为空、还是示例占位、userid 前后带空格都拒绝启动（为空时除非 `allowAll: true` 或有待配对的 `pairCode`） |
+| `allowedChatIds` | `[]` | 授权群的 chatid：这些群里**所有成员** @机器人 都能用，私聊和别的群不受影响。一般不手填，主人在群里发 `/授权本群` 自动写入；必须先有主人（`allowedUserIds` 非空）才生效；条目须是非空、前后无空格的字符串 |
 | `pairCode` | — | `npm run onboard` 生成的一次性配对码；白名单为空时第一个私聊发出它的人进白名单，随后自动删除 |
 | `allowAll` | `false` | 显式对所有人开放（仅当列表为空时生效，不推荐） |
 | `replyTimeoutMin` | `20` | 等助手回复的分钟数，超时后写墓碑、迟到回复不再补发，这条消息也不会再被 hook 重新认领执行 |
@@ -91,6 +93,21 @@ npm test
 | `allowedFileRoots` | `[<ROOT>/outgoing, os.tmpdir(), /tmp]` | outbox `file`/`images` 允许的目录（支持 `~/`）；realpath 后比对 |
 | `logMessageText` | `false` | 为 `true` 时 debug.log 记录消息原文（截断 300 字） |
 | `streamReplies` | `true` | 流式打字机，见"流式输出" |
+
+### 授权群
+
+默认只有 `allowedUserIds` 里的人（主人）能用。要让某个群里的所有人都能 @机器人 使用，主人在那个群里发：
+
+| 命令 | 作用 |
+|------|------|
+| `@机器人 /授权本群`（或 `/allowgroup`） | 把本群加进 `allowedChatIds`，回复"已授权本群：群里所有成员 @我 都能使用。"；已经授权过会提示 |
+| `@机器人 /取消授权本群`（或 `/disallowgroup`） | 把本群移出 `allowedChatIds`，之后群里只有主人 @机器人 才会回复 |
+
+- 只有主人能发，其他人发会被拒；在私聊里发会提示要到群里发；
+- daemon 直接处理（原子改写 `config.json`、立即生效，不用重启），不交给 Muse；
+- 没授权的群 @机器人 时，`debug.log` 里 `daemon.blocked_not_allowed` 带着该群的 `chatId`，想手动加可以从这里找；
+- 授权群里的文字、语音、图片、文件、卡片点击、`/stop` `/clear` `/compact` 都和主人一样可用；群里是一份共用的上下文，hook 会记下每轮是谁说的；
+- `npm run check-config` 和 `npm run doctor` 会显示授权群个数。
 
 环境变量 `MUSE_WECOM_ROOT` 可覆盖运行目录（默认是仓库目录，即 `dist/` 的上一级）；daemon、keepalive.sh、早报脚本都认它。
 
@@ -181,7 +198,7 @@ bash keepalive.sh --uninstall-cron
 
 ## 消息处理 hook 与多轮上下文
 
-`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题；发 `/compact`（可带重点）手动压缩，保留最近 2 轮原文、进行中的任务不受影响；发 `/stop` 立刻中断本会话进行中的任务（daemon 直接处理，旧回复不再发出，worker 每步检查自己的 `.claimed` 不在就停），之后直接发新指令。没有新消息时 hook 还会看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/一直连不上，keepalive 也没救回来）就唤醒 worker 去拉起、修复并报告，同一个故障每小时最多提醒一次。
+`hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板（安装见 SKILL.md），机制与 muse-feishu-bridge 相同：回复真正发出后记一轮，唤醒时把本会话的摘要 + 历史轮写进上下文文件、payload 带路径；每个会话上限 512KB（UTF-8），超了由 worker 压缩成摘要交给脚本合并；发 `/clear` 开始新话题；发 `/compact`（可带重点）手动压缩，保留最近 2 轮原文、进行中的任务不受影响；发 `/stop` 立刻中断本会话进行中的任务（daemon 直接处理，旧回复不再发出，worker 每步检查自己的 `.claimed` 不在就停），之后直接发新指令。群聊的每轮会记下说话人（`from`，userid），worker 能分清谁说了什么。没有新消息时 hook 还会看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/一直连不上，keepalive 也没救回来）就唤醒 worker 去拉起、修复并报告，同一个故障每小时最多提醒一次。
 
 ## 主动推送
 

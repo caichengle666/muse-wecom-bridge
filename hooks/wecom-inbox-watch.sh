@@ -5,8 +5,9 @@
 # worker 读 .claimed，处理完删除；worker 崩溃时，超过认领有效期会重新认领。
 #
 # 上下文（只由本脚本写，worker 从不直接改历史文件，避免两边同时写互相覆盖）：
-#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts}], next_seq, seq_floor, updated}
-#   ~/hooks/state/<NAME>-pending.json       已认领、还没收割的消息 {messageId: {chatId, text, ts, at, skip}}
+#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts,from?}], next_seq, seq_floor, updated}
+#                                           群聊的轮带 from（说话人 userid），单聊没有
+#   ~/hooks/state/<NAME>-pending.json       已认领、还没收割的消息 {messageId: {chatId, text, ts, at, skip, from?}}
 # worker 只会留下两种"请求文件"，由本脚本下一轮合并：
 #   <NAME>-ctx-<key>.summary.json  {summary, upto_seq}  把 seq ≤ upto_seq 的旧轮压缩进 summary（upto_seq < seq_floor 的是
 #                                  /clear 之前旧对话的，丢弃；/clear 归档后 seq 不归零，新历史从 seq_floor 开始）
@@ -176,14 +177,26 @@ def user_text(d):
         text = (text + " " if text else "") + "[附件: %s]" % ", ".join(notes)
     return text[:ITEM_MAX]
 
-def add_turn(info, assistant, now):
-    """没有正式回复的一轮（被 /stop 中断、超时）"""
+def with_from(turn, info):
+    """群聊的轮记下说话人（pending 里有 from 才有；单聊、旧数据没有）"""
+    if info.get("from"):
+        turn["from"] = info["from"]
+    return turn
+
+def append_turn(info, assistant, now):
+    """把一条消息记成一轮，返回更新后的 ctx（已写盘）"""
     chat = info.get("chatId") or "unknown"
     key = key_of(chat)
     ctx = load_ctx(key)
     ctx["chatId"] = chat
-    ctx["turns"].append({"seq": ctx["next_seq"], "user": info.get("text", ""), "assistant": assistant, "ts": int(now)})
+    ctx["turns"].append(with_from({"seq": ctx["next_seq"], "user": info.get("text", ""), "assistant": assistant, "ts": int(now)}, info))
     ctx["next_seq"] += 1
+    # 兜底：worker 一直没压缩、涨到 2 倍上限时，从最旧的开始丢到上限以内
+    if size(ctx) > 2 * max_bytes:
+        while len(ctx["turns"]) > 1 and size(ctx) > max_bytes:
+            ctx["turns"].pop(0)
+        if "已丢弃" not in ctx["summary"]:
+            ctx["summary"] = (ctx["summary"] + "\n（更早的若干轮未及时压缩，已丢弃）").strip()
     ctx["updated"] = int(now)
     save_atomic(ctx_path(key), ctx)
 
@@ -235,7 +248,7 @@ if mode == "harvest":
             del pending[mid]; changed = True
             if info.get("skip") or info.get("compact") is not None:
                 continue
-            add_turn(info, "（用户发 /stop 中断了这条，回复没有发出；中断前可能已执行了一部分）", now)
+            append_turn(info, "（用户发 /stop 中断了这条，回复没有发出；中断前可能已执行了一部分）", now)
             continue
         if not os.path.exists(sent_f):
             if os.path.exists(os.path.join(bridge, "expired", mid + ".tombstone")):
@@ -243,7 +256,7 @@ if mode == "harvest":
                 del pending[mid]; changed = True
                 if info.get("skip") or info.get("compact") is not None:
                     continue
-                add_turn(info, "（处理超时，回复没有发出，已提示用户重发；超时前可能已执行了一部分）", now)
+                append_turn(info, "（处理超时，回复没有发出，已提示用户重发；超时前可能已执行了一部分）", now)
                 continue
             gone = any(os.path.exists(os.path.join(bridge, d, mid + ".json")) for d in ("failed", "expired"))
             if gone or now - info.get("ts", now) > PENDING_TTL:
@@ -255,21 +268,7 @@ if mode == "harvest":
         del pending[mid]; changed = True
         if info.get("skip") or info.get("compact") is not None:   # /compact 本身不进历史
             continue
-        chat = info.get("chatId") or "unknown"
-        key = key_of(chat)
-        ctx = load_ctx(key)
-        ctx["chatId"] = chat
-        ctx["turns"].append({"seq": ctx["next_seq"], "user": info.get("text", ""),
-                             "assistant": (reply.get("text") or "")[:ITEM_MAX], "ts": int(now)})
-        ctx["next_seq"] += 1
-        # 兜底：worker 一直没压缩、涨到 2 倍上限时，从最旧的开始丢到上限以内
-        if size(ctx) > 2 * max_bytes:
-            while len(ctx["turns"]) > 1 and size(ctx) > max_bytes:
-                ctx["turns"].pop(0)
-            if "已丢弃" not in ctx["summary"]:
-                ctx["summary"] = (ctx["summary"] + "\n（更早的若干轮未及时压缩，已丢弃）").strip()
-        ctx["updated"] = int(now)
-        save_atomic(ctx_path(key), ctx)
+        append_turn(info, (reply.get("text") or "")[:ITEM_MAX], now)
     if changed:
         save_atomic(PENDING, pending)
 
@@ -283,6 +282,8 @@ elif mode == "record":
             continue
         chat = str(d.get("chatId") or "unknown")
         pending[mid] = {"chatId": chat, "text": user_text(d), "ts": int(time.time()), "at": str(d.get("ts", ""))}
+        if d.get("chatType") == "group" and d.get("senderUserId"):
+            pending[mid]["from"] = str(d["senderUserId"])
         # /stop 之后的第一条：标 after_stop（同一次 /stop 只标一次，记在历史文件的 stop_seen）
         st = stop_info(chat)
         st_at = str(st.get("at") or "")
@@ -323,12 +324,12 @@ elif mode == "context":
                     and not os.path.exists(ctx_path(key, ".summary")))
         if need:
             flagged.add(key)
-        turns = [{"seq": t["seq"], "user": t.get("user", ""), "assistant": t.get("assistant", "")} for t in ctx["turns"]]
+        turns = [with_from({"seq": t["seq"], "user": t.get("user", ""), "assistant": t.get("assistant", "")}, t) for t in ctx["turns"]]
         # 同会话里比这条早、还没回完的（用户连发几条时）
         mine = me.get("at", "")
         for at, k in sorted((v.get("at", ""), k) for k, v in pending.items()
                             if k != mid and v.get("chatId") == chat and not v.get("skip") and v.get("at", "") < mine):
-            turns.append({"user": pending[k].get("text", ""), "assistant": "（这条还在处理中，回复尚未发出）"})
+            turns.append(with_from({"user": pending[k].get("text", ""), "assistant": "（这条还在处理中，回复尚未发出）"}, pending[k]))
         out[mid] = {"ctx_key": key, "summary": ctx["summary"], "turns": turns, "compress_needed": need}
         if me.get("after_stop"):
             out[mid]["after_stop"] = True

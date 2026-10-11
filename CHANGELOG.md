@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.3.3
+
+- 新增授权群：主人在群里发 `@机器人 /授权本群`（或 `/allowgroup`），这个群里所有成员 @机器人 都能用；`/取消授权本群`（或 `/disallowgroup`）撤销。daemon 直接处理、写进 `config.json` 新增的 `allowedChatIds`、立即生效；非主人发会被拒；私聊和别的群不受影响
+- 白名单判定改为看发送人 + 会话：文字、语音、图片、文件、视频、卡片点击、欢迎语、点赞回执、`/stop` 统一按同一规则放行；没授权的群 @机器人 时日志 `daemon.blocked_not_allowed` 带 `chatId`
+- `allowedChatIds` 校验：必须是非空、前后无空格的字符串；只有授权群、没有主人时拒绝启动（配对中只给警告）；check-config / doctor 显示授权群个数
+- 群聊上下文记下说话人：历史和上下文里的每轮带 `from`（userid），hook 提示词让 worker 分清谁说了什么；旧历史照常加载，单聊不变
+- 升级：git pull && npm ci && npm run build，重启 daemon；把 hooks/wecom-inbox-watch.sh 重新复制到 ~/hooks/scripts/；hook 定义的 prompt 改了，用 hooks/wecom-inbox-watch.json 重新注册（保留自己的 delivery.to）
+
 ## 0.3.2
 
 - 新增出网代理支持（同飞书桥）：检测到 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 时，长连接、文件下载、onboard 扫码接口统一走 CONNECT 隧道（keepAlive 复用）；遵守 `NO_PROXY`；`config.json` 新增 `proxy`（`auto` / `off` / 代理 URL）。以前长连接和 onboard 不认代理变量，只能经代理出网的机器上连不上

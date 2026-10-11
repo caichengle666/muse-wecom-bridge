@@ -157,3 +157,34 @@ test("hook #2: /clear 之后才到的旧压缩结果被丢弃，不冲掉新对�
   assert.deepEqual(ctx.turns.map((t: { user: string }) => t.user), ["清空后第一句"]);
   assert.equal(ctx.summary, "");
 });
+
+test("hook: 群聊历史记下说话人 from（已回复、超时、还在处理中的都带）；单聊没有；旧历史没有 from 照常加载", async () => {
+  const h = await makeHook({});
+  const put = (id: string, chatId: string, chatType: string, from: string, text: string, ts: string) =>
+    writeFile(join(h.br, "inbox", `${id}.json`), JSON.stringify({ messageId: id, chatId, chatType, senderUserId: from, text, ts }));
+  // 旧版历史文件：没有 from
+  await writeFile(join(h.ctx, "wecom-ctx-g1.json"), JSON.stringify({ chatId: "g1", summary: "", turns: [{ seq: 1, user: "旧问题", assistant: "旧回答", ts: 1 }], next_seq: 2 }));
+  await put("a1", "g1", "group", "alice", "@Muse 明天开会吗", "2026-10-11T00:00:01Z");
+  h.run();
+  await h.replied("a1", "开");
+  await put("b1", "g1", "group", "bob", "@Muse 几点", "2026-10-11T00:00:02Z");
+  h.run();
+  await writeFile(join(h.br, "expired", "b1.tombstone"), "x\n");
+  await rm(join(h.br, "inbox", "b1.json.claimed"), { force: true });
+  await put("c1", "g1", "group", "carol", "@Muse 我也去", "2026-10-11T00:00:03Z");
+  await put("d1", "g1", "group", "dave", "@Muse 在哪", "2026-10-11T00:00:04Z");
+  await put("p1", "u1", "single", "u1", "私聊", "2026-10-11T00:00:05Z");
+  const out = h.run();
+  const ctx = await h.ctxOf("g1");
+  assert.deepEqual(ctx.turns.map((t: { user: string; from?: string }) => [t.user, t.from]), [
+    ["旧问题", undefined],
+    ["@Muse 明天开会吗", "alice"],
+    ["@Muse 几点", "bob"],
+  ]);
+  const wake = JSON.parse(await readFile(JSON.parse(/"context_file":("[^"]+")/.exec(out)![1]) as string, "utf8"));
+  assert.deepEqual(wake.d1.turns.map((t: { from?: string }) => t.from), [undefined, "alice", "bob", "carol"], "还在处理中的那条也带 from");
+  assert.ok(wake.p1.turns.every((t: { from?: string }) => t.from === undefined));
+  await h.replied("p1", "好");
+  h.run();
+  assert.ok((await h.ctxOf("u1")).turns.every((t: { from?: string }) => !("from" in t)), "单聊不记 from");
+});

@@ -272,9 +272,9 @@ test("bug8: 白名单为空 → 配置校验失败（fail-closed）；allowAll:t
   assert.ok(validateConfig({ allowedUserIds: [] }).errors.length > 0);
   assert.deepEqual(validateConfig({ allowedUserIds: ["u1"] }).errors, []);
   assert.deepEqual(validateConfig({ allowAll: true }).errors, []);
-  assert.equal(makeIsAllowed({})("anyone"), false, "原实现：空列表 = 对所有人开放");
-  assert.equal(makeIsAllowed({ allowAll: true })("anyone"), true);
-  assert.equal(makeIsAllowed({ allowedUserIds: ["u1"], allowAll: true })("u2"), false, "列表非空时以列表为准");
+  assert.equal(makeIsAllowed({})("anyone", "single", "anyone"), false, "原实现：空列表 = 对所有人开放");
+  assert.equal(makeIsAllowed({ allowAll: true })("anyone", "single", "anyone"), true);
+  assert.equal(makeIsAllowed({ allowedUserIds: ["u1"], allowAll: true })("u2", "single", "u2"), false, "列表非空时以列表为准");
 });
 
 test("bug8: daemon / check-config 在白名单为空时拒绝启动（不连网）", async () => {

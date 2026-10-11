@@ -52,7 +52,7 @@ muse-wecom-bridge/
   src/config.ts paths.ts chunk.ts logger.ts fsutil.ts
   src/test/            node --test 离线测试
   dist/                tsc 编译产物（node 直接运行）
-  config.json          非密钥配置：wsUrl/allowedUserIds/allowAll/回复超时/allowedFileRoots/logMessageText
+  config.json          非密钥配置：wsUrl/allowedUserIds/allowedChatIds/allowAll/回复超时/allowedFileRoots/logMessageText
   secrets.env          BotID/Secret（600 权限，不提交；复制 secrets.env.example）
   inbox/ outbox/ sent/ 消息队列目录
   failed/ expired/     永久失败（附 .reason.json）/ 超时过期（含 .tombstone 墓碑）
@@ -70,7 +70,7 @@ muse-wecom-bridge/
 2. 管理后台 → 工作台 → 智能机器人 → 创建机器人 → **API 模式** → 连接方式选**长连接**。
 3. 机器人详情页拿到 **BotID** 和 **Secret**，通过安全方式发给助手（不要直接贴聊天里）。
 4. 可见范围包含自己；私聊建议配白名单（`config.json` → `allowedUserIds` 填自己的 userid）；
-   群聊里 @ 机器人触发（注意：@ 是消息路由不是鉴权，群成员控制靠可见范围/群成员管理）。
+   群聊里 @ 机器人触发（@ 是消息路由不是鉴权）：默认只认白名单里的人；主人在群里发 `/授权本群` 后该群所有成员可用（`allowedChatIds`）。
 
 ## 联调步骤（凭证到位后）
 
@@ -137,7 +137,9 @@ muse-wecom-bridge/
 8. **有界增长**：debug.log 10MB 轮转（留 1 份）；incoming/、feedback_raw/ 7 天，sent/、expired/、failed/ 30 天，每小时清理；
    默认不记录消息原文（`logMessageText: true` 才记）。
 9. **白名单 fail-closed**：`allowedUserIds` 为空且未显式 `allowAll: true` 时拒绝启动；白名单同样作用于空语音提示、
-   图文混排提示、点赞回执、进入会话欢迎语、卡片回调。
+   图文混排提示、点赞回执、进入会话欢迎语、卡片回调。判定为 `isAllowed(sender, chatType, chatId)`：发送人在
+   `allowedUserIds`，或群聊且 chatid 在 `allowedChatIds`（授权群）；没有主人时授权群不生效（只有群没有主人是无效配置）。
+   `/授权本群`、`/取消授权本群` 由 daemon 处理：只认主人，与配对共用一个串行的 config.json 读改写（以磁盘为准、原子写入），改完立即刷新判定。
 10. **卡片回调**：只有演示 key 在 daemon 内处理；其它 key 更新为同 card_type 的"已收到"（基于 `cards.json` 里的原卡片快照），
     再把 `{type:"card_event"}` 投进 inbox 交给助手。task_id 回退表统一按会话键（群聊 chatid、单聊 userid）登记与查找。
 

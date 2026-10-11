@@ -14,7 +14,7 @@ import tls from "node:tls";
 import { WSClient } from "@wecom/aibot-node-sdk";
 import { MuseBackend } from "./muse-backend.js";
 import { makePaths, resolveRoot } from "./paths.js";
-import { isPlaceholder, loadConfig, loadSecrets, pairingPending, validateConfig, type BridgeConfig } from "./config.js";
+import { cleanIds, isPlaceholder, loadConfig, loadSecrets, pairingPending, validateConfig, type BridgeConfig } from "./config.js";
 import { RotatingLogger } from "./logger.js";
 import { CardEventDedupe, CardRegistry, HeartbeatWriter, SeenStore, removePidFileSync, writePidFile } from "./state.js";
 import { selfIdentity } from "./proc.js";
@@ -92,6 +92,8 @@ async function main(): Promise<void> {
     console.log(`  wsUrl=${wsUrl}`);
     console.log(`  出网: ${proxy.label}`);
     console.log(`  白名单: ${list.length ? list.join(",") : pairingPending(cfg) ? "等待配对（私聊机器人发送配对码）" : "allowAll=true（对所有人开放）"}`);
+    const groups = cleanIds(cfg.allowedChatIds).length;
+    console.log(`  授权群: ${groups} 个${groups && !list.length ? "（还没有主人，暂不生效）" : ""}`);
     console.log(`  允许外发文件目录: ${resolveAllowedRoots(paths.root, cfg.allowedFileRoots).join(", ")}`);
     const probe = await probeGateway(wsUrl, agent);
     console.log(`  网关连通性: ${probe.ok ? "OK" : "FAIL"}（${probe.detail}）`);
