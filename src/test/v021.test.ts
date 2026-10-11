@@ -12,7 +12,7 @@ import { parseProcStat, readStartTime, isSameProcessAlive, STARTTIME_REST_INDEX,
 import { acquireInstanceLock, releaseInstanceLock } from "../lock.js";
 import { CardEventDedupe } from "../state.js";
 import { cardEventMessageId } from "../bridge.js";
-import { errcodeOf, isPermanentError, runDelivery, OutboxStore, type Channel, type ReplyPayload } from "../outbox.js";
+import { errcodeOf, isPermanentError, runDelivery, type Channel, type ReplyPayload } from "../outbox.js";
 import { checkOutgoingFile, denyInodes } from "../files.js";
 
 const REPO = join(fileURLToPath(import.meta.url), "..", "..", "..");

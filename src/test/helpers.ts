@@ -118,11 +118,20 @@ export interface Env {
 }
 
 export async function makeEnv(
-  opts: { config?: BridgeConfig; replyTimeoutMs?: number; ackDelayMs?: number; kickExitDelayMs?: number; root?: string } = {},
+  opts: {
+    config?: BridgeConfig;
+    replyTimeoutMs?: number;
+    ackDelayMs?: number;
+    kickExitDelayMs?: number;
+    root?: string;
+    streamPollMs?: number;
+    streamMinIntervalMs?: number;
+    streamWindowMs?: number;
+  } = {},
 ): Promise<Env> {
   const root = opts.root ?? (await mkdtemp(join(tmpdir(), "mwb-test-")));
   const paths = makePaths(root);
-  for (const d of [paths.outgoing, paths.incoming, paths.feedbackRaw]) await mkdir(d, { recursive: true });
+  for (const d of [paths.outgoing, paths.incoming, paths.feedbackRaw, paths.stream]) await mkdir(d, { recursive: true });
   await writeFile(paths.secrets, "WECOM_BOT_ID=real\nWECOM_BOT_SECRET=s3cr3t\n");
   const logs: Env["logs"] = [];
   const log = (event: string, data: Record<string, unknown> = {}) => void logs.push({ event, data });
@@ -158,6 +167,9 @@ export async function makeEnv(
     exit: (c) => void exits.push(c),
     kickExitDelayMs: opts.kickExitDelayMs ?? 20,
     ackDelayMs: opts.ackDelayMs ?? 60_000,
+    streamPollMs: opts.streamPollMs ?? 10,
+    streamMinIntervalMs: opts.streamMinIntervalMs ?? 0,
+    ...(opts.streamWindowMs ? { streamWindowMs: opts.streamWindowMs } : {}),
   });
   return { root, paths, client, backend, outbox, seen, heartbeat, cards, logs, exits, bridge };
 }

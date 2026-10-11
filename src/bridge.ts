@@ -16,6 +16,7 @@ import type { LogFn } from "./logger.js";
 import { CardEventDedupe, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
 import { atomicWriteJson, errText, pruneOldFiles } from "./fsutil.js";
 import { chunkByBytes } from "./chunk.js";
+import { parseStreamText, streamDisplayText } from "./stream.js";
 import { resolveAllowedRoots, type MediaType } from "./files.js";
 import {
   OutboxDrainer,
@@ -78,9 +79,12 @@ export interface BridgeDeps {
   kickExitDelayMs?: number;
   ackDelayMs?: number;
   maxAttempts?: number;
+  /** 流式：读 stream 文件的间隔（默认 1 秒）、两次推送的最小间隔（默认 3 秒，会话限 30 条/分钟）、流式消息的有效窗口（默认 9 分钟，平台上限 10 分钟） */
+  streamPollMs?: number;
+  streamMinIntervalMs?: number;
+  streamWindowMs?: number;
 }
 
-export const DEMO_KEYS = new Set(["demo_confirm", "demo_cancel"]);
 /** 点了"已收到/已确认"这类收尾按钮：原地更新，不进 inbox */
 export const DONE_KEYS = new Set(["demo_done", "muse_ack_done"]);
 
@@ -190,6 +194,10 @@ export function createBridge(d: BridgeDeps) {
   const kickExitDelayMs = d.kickExitDelayMs ?? 1500;
   const ackDelayMs = d.ackDelayMs ?? 8000;
   const logText = config.logMessageText === true;
+  const streaming = config.streamReplies !== false;
+  const streamPollMs = d.streamPollMs ?? 1000;
+  const streamMinIntervalMs = d.streamMinIntervalMs ?? 3000;
+  const streamWindowMs = d.streamWindowMs ?? 9 * 60 * 1000;
 
   const engine: EngineOptions = {
     root: paths.root,
@@ -218,6 +226,48 @@ export function createBridge(d: BridgeDeps) {
     }
   }
 
+  /**
+   * 一条用户消息对应的流式消息：同一 streamId 整体覆盖，首次发送起 10 分钟内必须 finish。
+   * 推送串行执行；推送失败（如超时 846608）后关闭，之后的内容改为另发新消息。
+   */
+  class StreamReply {
+    readonly sid = newStreamId();
+    startedAt = 0;
+    lastPushAt = 0;
+    lastText = "";
+    closed = false;
+    private chain: Promise<unknown> = Promise.resolve();
+
+    constructor(private readonly frame: Frame, private readonly msgid: string) {}
+
+    get open(): boolean {
+      return this.startedAt > 0 && !this.closed;
+    }
+
+    push(content: string, finish: boolean): Promise<boolean> {
+      const run = async (): Promise<boolean> => {
+        if (this.closed) return false;
+        if (!finish && content === this.lastText) return true;
+        try {
+          const first = this.startedAt === 0;
+          await client.replyStream(this.frame, this.sid, content, finish, undefined, first ? { id: feedbackId(this.sid) } : undefined);
+          if (first) this.startedAt = Date.now();
+          this.lastPushAt = Date.now();
+          this.lastText = content;
+          if (finish) this.closed = true;
+          return true;
+        } catch (e) {
+          this.closed = true;
+          log("daemon.stream_push_error", { msgid: this.msgid, finish, error: errText(e) });
+          return false;
+        }
+      };
+      const p = this.chain.then(run, run);
+      this.chain = p.catch(() => undefined);
+      return p;
+    }
+  }
+
   function mediaBody(type: MediaType, mediaId: string, filename: string, fb: string): Record<string, unknown> {
     return {
       msgtype: type,
@@ -226,11 +276,13 @@ export function createBridge(d: BridgeDeps) {
     };
   }
 
-  function passiveChannel(frame: Frame, msgid: string, chatKey: string): Channel {
+  function passiveChannel(frame: Frame, msgid: string, chatKey: string, stream?: StreamReply): Channel {
     return {
       kind: "passive",
       imagesBatch: true,
       async sendText(chunk, i) {
+        // 第一段直接定格在流式消息上（覆盖"处理中"/预览内容）
+        if (i === 0 && stream?.open && (await stream.push(chunk, true))) return;
         const sid = newStreamId();
         await client.replyStream(frame, sid, chunk, true, undefined, i === 0 ? { id: feedbackId(sid) } : undefined);
       },
@@ -309,7 +361,7 @@ export function createBridge(d: BridgeDeps) {
 
   type DeliverOutcome = DeliveryResult | { status: "timeout" } | { status: "stopped" };
 
-  async function deliverReply(frame: Frame, msgid: string, chatKey: string): Promise<DeliverOutcome> {
+  async function deliverReply(frame: Frame, msgid: string, chatKey: string, stream?: StreamReply): Promise<DeliverOutcome> {
     activeWaits.add(msgid);
     waitChats.set(msgid, chatKey);
     try {
@@ -325,10 +377,11 @@ export function createBridge(d: BridgeDeps) {
           return "error";
         });
         log("daemon.reply_timeout", { msgid, owner });
-        await replyStreamText(frame, "刚才处理超时了，麻烦再发一次吧。").catch(() => undefined);
+        const msg = "刚才处理超时了，麻烦再发一次吧。";
+        if (!(stream?.open && (await stream.push(msg, true)))) await replyStreamText(frame, msg).catch(() => undefined);
         return { status: "timeout" };
       }
-      const res = await runDelivery(outbox, reply, passiveChannel(frame, msgid, chatKey), engine);
+      const res = await runDelivery(outbox, reply, passiveChannel(frame, msgid, chatKey, stream), engine);
       if (res.status !== "sent") log("daemon.reply_not_archived", { msgid, ...res });
       return res;
     } finally {
@@ -367,19 +420,67 @@ export function createBridge(d: BridgeDeps) {
     ).catch(() => undefined);
   }
 
-  /** 8 秒内正式回复没来，先发一条"收到，正在处理"。 */
+  const ACK_TEXT = "收到，正在处理，稍等…";
+
+  /**
+   * 8 秒内正式回复没来，先发"收到，正在处理"。
+   * 流式开启时这条就是流式消息：worker 往 stream/<id>.jsonl 追加的内容每 3 秒刷新上去，
+   * 正式回复到达后第一段定格在这条消息上；快到 10 分钟窗口时先收尾，正式回复另发。
+   */
   async function deliverReplyWithAck(frame: Frame, msgid: string, chatKey: string): Promise<DeliverOutcome> {
     let ackSent = false;
+    // 文件名与 inbox/<id>.json 同为原始消息 ID（worker 按 <id> 追加）；含路径分隔符的 ID 不启用流式
+    const stream = streaming && !/[\\/]/.test(msgid) ? new StreamReply(frame, msgid) : undefined;
+    const streamFile = join(paths.stream, `${msgid}.jsonl`);
+    let previewed = false;
     const t = setTimeout(() => {
       ackSent = true;
       log("daemon.ack_sent", { msgid });
-      replyStreamText(frame, "收到，正在处理，稍等…").catch(() => undefined);
+      if (stream) {
+        if (!previewed) void stream.push(ACK_TEXT, false);
+      } else replyStreamText(frame, ACK_TEXT).catch(() => undefined);
     }, ackDelayMs);
     t.unref?.();
+    let pumping = false;
+    const pump = stream
+      ? setInterval(() => {
+          if (pumping || stream.closed) return;
+          pumping = true;
+          void (async () => {
+            const now = Date.now();
+            if (stream.open && now - stream.startedAt >= streamWindowMs) {
+              const head = previewed ? stream.lastText : "还在处理中";
+              await stream.push(`${head}\n\n（处理时间较长，完成后另发完整回复）`, true);
+              log("daemon.stream_window_closed", { msgid });
+              return;
+            }
+            if (now - stream.lastPushAt < streamMinIntervalMs) return;
+            const raw = await readFile(streamFile, "utf8").catch(() => "");
+            const text = raw ? parseStreamText(raw) : "";
+            if (!text.trim()) return;
+            if (!previewed) log("daemon.stream_started", { msgid });
+            previewed = true;
+            await stream.push(streamDisplayText(text), false);
+          })().finally(() => {
+            pumping = false;
+          });
+        }, streamPollMs)
+      : undefined;
+    pump?.unref?.();
+    let outcome: DeliverOutcome | undefined;
     try {
-      return await deliverReply(frame, msgid, chatKey);
+      outcome = await deliverReply(frame, msgid, chatKey, stream);
+      return outcome;
     } finally {
       clearTimeout(t);
+      if (pump) clearInterval(pump);
+      if (stream?.open) {
+        // 正式回复没有走文字（只有文件/图片/卡片、被 /stop、出错）：把流式消息收尾，免得一直显示"生成中"
+        const tail =
+          outcome?.status === "stopped" ? "已停止。" : previewed ? stream.lastText : outcome?.status === "sent" ? "已完成。" : "处理中断了，麻烦再发一次吧。";
+        await stream.push(tail, true);
+      }
+      if (stream) await rm(streamFile, { force: true }).catch(() => undefined);
       if (ackSent) log("daemon.ack_then_replied", { msgid });
     }
   }
@@ -679,6 +780,7 @@ export function createBridge(d: BridgeDeps) {
       expired: await pruneOldFiles(paths.expired, 30 * DAY, now),
       failed: await pruneOldFiles(paths.failed, 30 * DAY, now),
       stop: await pruneOldFiles(paths.stop, 7 * DAY, now),
+      stream: await pruneOldFiles(paths.stream, DAY, now),
     };
     if (Object.values(res).some((n) => n > 0)) log("daemon.pruned", res);
     return res;
@@ -751,4 +853,3 @@ export function createBridge(d: BridgeDeps) {
   };
 }
 
-export type Bridge = ReturnType<typeof createBridge>;

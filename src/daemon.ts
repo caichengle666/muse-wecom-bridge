@@ -89,6 +89,7 @@ async function main(): Promise<void> {
   // 0.2.1：daemon 自己用 O_EXCL 创建 daemon.lock（pid + starttime + token），陈旧锁安全回收；
   // 不再依赖 keepalive 的"先检查再拉起"。
   await mkdir(paths.root, { recursive: true });
+  await mkdir(paths.stream, { recursive: true });
   const self = selfIdentity();
   const lock = acquireInstanceLock(paths.lock, self);
   if (!lock.ok) return fail(`${lock.reason}（见 ${paths.lock}）`, 1);

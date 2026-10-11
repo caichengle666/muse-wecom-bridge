@@ -6,6 +6,8 @@
 # 用法：
 #   bash keepalive.sh            # 检查并在需要时拉起
 #   bash keepalive.sh --status   # 只检查：健康 exit 0，不健康 exit 1（不做任何动作）
+#   bash keepalive.sh --install-cron    # 装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行）
+#   bash keepalive.sh --uninstall-cron
 #   source keepalive.sh          # 只定义函数、不执行（测试用）
 #
 # 环境变量（都可选）：
@@ -175,6 +177,26 @@ acquire_ka_lock() {
 # 被 source 时只定义函数（测试用）
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0 2>/dev/null || true
+fi
+
+# 安装 / 卸载 cron（幂等：按标记行替换，不动用户的其他条目）
+if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
+  command -v crontab >/dev/null 2>&1 || { echo "未找到 crontab，请先安装 cron（如 apt-get install cron）"; exit 2; }
+  MARK="# muse-wecom-bridge keepalive ($ROOT)"
+  CUR="$(crontab -l 2>/dev/null | grep -vF "$MARK" || true)"
+  if [ "$1" = "--uninstall-cron" ]; then
+    printf '%s\n' "$CUR" | sed '/^$/d' | crontab - && echo "已移除 cron 条目"; exit $?
+  fi
+  KA="/bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
+  {
+    printf '%s\n' "$CUR" | sed '/^$/d'
+    echo "*/5 * * * * $KA $MARK"
+    echo "@reboot sleep 30 && $KA $MARK"
+  } | crontab - || exit 1
+  echo "已安装 cron：每 5 分钟检查一次 + 开机 30 秒后拉起"
+  crontab -l | grep -F "$MARK"
+  pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1 || echo "警告：cron 服务似乎没在运行（service cron start）"
+  exit 0
 fi
 
 if [ "${1:-}" = "--status" ]; then

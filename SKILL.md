@@ -22,8 +22,12 @@ npm install
 cp secrets.env.example secrets.env   # 填入 WECOM_BOT_ID / WECOM_BOT_SECRET，chmod 600
 cp config.example.json config.json   # 填 allowedUserIds（企业微信 userid）
 npm run build && npm test
-npm start                            # 或用 keepalive.sh + cron 常驻
+bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
+# 注册 hook（见下文「消息处理 hook」）后：
+npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
+
+部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机企业微信**给机器人发一条消息，收到回复才算真的通了。
 
 ## 不会申请机器人？让 Muse 代办
 

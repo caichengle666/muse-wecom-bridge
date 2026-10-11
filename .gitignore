@@ -20,6 +20,8 @@ daemon.pid
 daemon.lock
 daemon.lock.stale.*
 card_events.json
+stream/
+stop/
 .keepalive.lock.d/
 .keepalive.lock
 inbox/

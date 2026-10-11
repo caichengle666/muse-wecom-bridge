@@ -40,29 +40,6 @@ export interface InboxItem {
   taskId?: string;
 }
 
-export interface OutboxItem {
-  messageId: string;
-  chatId: string;
-  text: string;
-  ts: string;
-  /**
-   * 可选：要随回复一起发给用户的文件（本机绝对路径）。
-   * daemon 会走 SDK 的 uploadMedia → replyMedia（被动回复通道）把它发出去。
-   * 兼容旧格式：只有 text 时就是纯文本回复。
-   */
-  file?: string;
-  /**
-   * 可选：模板卡片对象（TemplateCard），daemon 用 replyTemplateCard 发出。
-   * 与 text/file 可组合：先发文本/文件，再发卡片。
-   */
-  card?: Record<string, unknown>;
-  /**
-   * 可选：要附在回复里的本机图片（JPG/PNG，单张 ≤10MB，最多 10 张）。
-   * daemon 走 replyStreamWithCard 的 msgItem 直接显示在对话里，适合图文并茂的回复。
-   */
-  images?: string[];
-}
-
 /** waitReply 的返回：即解析后的 outbox 内容（见 outbox.ts ReplyPayload）。 */
 export type ReplyResult = ReplyPayload;
 

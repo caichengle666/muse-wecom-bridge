@@ -2,7 +2,7 @@
  * state.ts — 持久化小状态：去重水位（state.json）、心跳（heartbeat.json）、
  * 卡片登记（cards.json）、pid 文件（daemon.pid）。全部原子写。
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readFileSync, rmSync } from "node:fs";
 import { atomicWriteJson, atomicWriteFile, SerialQueue } from "./fsutil.js";
 import { formatIdentity, isSameProcessAlive, parseIdentity, type Identity } from "./proc.js";
@@ -184,14 +184,6 @@ export function readPidFile(path: string): Identity | null {
     return parseIdentity(readFileSync(path, "utf8"));
   } catch {
     return null;
-  }
-}
-
-export async function removePidFile(path: string, id: Identity): Promise<void> {
-  try {
-    if (parseIdentity(await readFile(path, "utf8"))?.token === id.token) await rm(path, { force: true });
-  } catch {
-    /* 不存在 */
   }
 }
 

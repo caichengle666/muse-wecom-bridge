@@ -20,6 +20,8 @@ export interface BridgeConfig {
   allowedFileRoots?: string[];
   /** 为 true 时 debug.log 里记录消息原文（截断 300 字）；默认不记。 */
   logMessageText?: boolean;
+  /** 流式输出：worker 往 stream/<messageId>.jsonl 边写边追加，daemon 推成企业微信的流式消息（打字机效果），默认 true。 */
+  streamReplies?: boolean;
 }
 
 export function parseEnvFile(text: string): Record<string, string> {

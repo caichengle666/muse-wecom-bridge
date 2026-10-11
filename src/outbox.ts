@@ -24,7 +24,7 @@ import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { atomicWriteJson, atomicWriteFile, moveFile, errText } from "./fsutil.js";
+import { atomicWriteJson, atomicWriteFile, errText } from "./fsutil.js";
 import { chunkByBytes, STREAM_CHUNK_BYTES } from "./chunk.js";
 import { checkOutgoingFile, detectMediaType, type MediaType } from "./files.js";
 import type { LogFn } from "./logger.js";

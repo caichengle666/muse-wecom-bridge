@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.2.0
+
+- 流式打字机：worker 边写边往 `stream/<id>.jsonl` 追加，daemon 推成企业微信流式消息（"处理中"那条直接长出内容，正式回复定格在同一条上）；每 3 秒最多刷新一次，9 分钟窗口收尾后正式回复另发；`/stop`、超时、出错都会收尾；`streamReplies: false` 关闭
+- 保活：`keepalive.sh --install-cron / --uninstall-cron`；hook 发现心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron）；回复在 outbox 超过 3 分钟没发出时唤醒 Muse 排查
+- 新增 `npm run doctor`：只读自检（凭证、白名单、daemon、cron、hook 脚本路径、hook 定义是否启用、积压、失败）
+- 删除无用代码（未使用的 OutboxItem 类型、DEMO_KEYS、removePidFile 等）；`npm run build` 先清空 dist，升级后不残留旧编译产物
+- 升级：git pull && npm ci && npm run build，重启 daemon，并把 hooks/wecom-inbox-watch.sh 重新复制到 ~/hooks/scripts/
+
 ## 0.1.4
 
 - （后补，未改版本号）新增 `/compact [重点]` 手动压缩上下文：较早的对话压成摘要、保留最近 2 轮原文，进行中的长任务不受影响（与飞书一致）
