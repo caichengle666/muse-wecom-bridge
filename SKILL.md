@@ -42,11 +42,23 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 
 `npm run onboard` 的做法（Muse 照做）：
 
-1. 后台运行 `npm run onboard > onboard.log 2>&1 &`（最多等 5 分钟）；几秒后日志里出现 `https://work.weixin.qq.com/ai/qc/gen?...` 链接，同时生成 `onboard-qr.png`
-2. **把 `onboard-qr.png` 图片发给用户**（附上链接），请用户用**手机企业微信**扫码，按提示点「一键创建智能机器人」
-3. 日志出现"成功"后：Bot ID / Secret 已写入 `secrets.env`（600），日志里有一行 `配对码：XXXXXXXX`（8 位，也写在 `config.json` 的 `pairCode`）
-4. 扫码拿不到扫码人的 userid，所以白名单靠配对码补：daemon 起来后，**把配对码告诉用户，让他在企业微信里私聊机器人发这个码**；机器人回"配对成功"即自动写进 `allowedUserIds`、配对码作废。配对前别人发消息只收到"还没绑定主人"；群里发码不算
-5. 日志出现"扫码超时"就重新运行；secrets.env 里已有机器人会被新的替换（扫码只能新建，不能接管已有机器人）
+1. 后台运行（最多等 5 分钟）：
+
+   ```bash
+   cd ~/workspace/muse-wecom-bridge
+   nohup npm run onboard > onboard.log 2>&1 &
+   sleep 8; grep -E "二维码图片|浏览器打开" onboard.log
+   ```
+
+2. 二维码和链接从日志里拿：
+   - 图片：`[onboard] 二维码图片：` 那行给的绝对路径，就是仓库根目录的 `onboard-qr.png`（`~/workspace/muse-wecom-bridge/onboard-qr.png`）
+   - 链接：`也可以在电脑浏览器打开这个页面扫码：` 后面那个 `https://work.weixin.qq.com/ai/qc/gen?...`（电脑上打开是同一个二维码）
+   - 8 秒后还没有这两行，就 `cat onboard.log` 看报错（常见：没 `npm run build`、网络不通）
+3. **把这张图片作为图片/文件直接发给用户**（附上链接），请用户用**手机企业微信**扫码，按提示点「一键创建智能机器人」
+4. 等结果：每隔 15 秒 `tail -5 onboard.log`，直到出现 `[onboard] 成功` 或"扫码超时"；期间不要重复运行（重跑会生成新码，旧码作废）
+5. 日志出现"成功"后：Bot ID / Secret 已写入 `secrets.env`（600），日志里有一行 `配对码：XXXXXXXX`（8 位，也写在 `config.json` 的 `pairCode`）
+6. 扫码拿不到扫码人的 userid，所以白名单靠配对码补：daemon 起来后，**把配对码告诉用户，让他在企业微信里私聊机器人发这个码**；机器人回"配对成功"即自动写进 `allowedUserIds`、配对码作废。配对前别人发消息只收到"还没绑定主人"；群里发码不算
+7. 日志出现"扫码超时"就重新运行；secrets.env 里已有机器人会被新的替换（扫码只能新建，不能接管已有机器人）
 
 ## 扫码失败时
 
