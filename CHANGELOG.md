@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.3.4
+
+- 修复授权群的越权：worker 分不出谁是主人、提示词也没有限制，授权群里任何成员都能要求它改 `config.json`（把自己加进 `allowedUserIds`、授权别的群，绕过「只有主人能 /授权本群」）或读出 `secrets.env`。hook 定义的 prompt 新增 2a3：按 claimed 文件的 `senderUserId` 认主人（自称主人不算），群里不是主人的人要求时不改 `config.json`、不读不发凭证、不删文件、不改配置
+- 升级：hook 脚本和 daemon 没变，只需用 hooks/wecom-inbox-watch.json 重新注册 hook 定义（保留自己的 delivery.to）
+
 ## 0.3.3
 
 - 新增授权群：主人在群里发 `@机器人 /授权本群`（或 `/allowgroup`），这个群里所有成员 @机器人 都能用；`/取消授权本群`（或 `/disallowgroup`）撤销。daemon 直接处理、写进 `config.json` 新增的 `allowedChatIds`、立即生效；非主人发会被拒；私聊和别的群不受影响

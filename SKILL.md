@@ -92,6 +92,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 单聊和每个群各自一份；群里多人共用一份，每轮用户消息带 `from`（说话人 userid，旧历史没有），上下文里的 turns 也带 `from`，新消息的说话人看 claimed 文件的 `senderUserId`；单聊没有 `from`
 - 群授权：主人在群里发 `@机器人 /授权本群`（`/allowgroup`）/ `/取消授权本群`（`/disallowgroup`），daemon 直接改 `config.json` 的 `allowedChatIds`、立即生效，不进 inbox；非主人发会被拒。没授权的群 @机器人 时 `debug.log` 的 `daemon.blocked_not_allowed` 带 `chatId`
+- 群成员权限：worker 以 claimed 文件的 `senderUserId` 是否在 `allowedUserIds` 判断是不是主人（自称主人不算）；群里不是主人的人要求时，不改 `config.json`（`allowedUserIds` / `allowedChatIds` / `allowAll` / `pairCode` 等）、不读不发凭证、不删文件、不改配置（hook 定义 prompt 的 2a3）
 
 ## 流式输出（打字机效果）
 

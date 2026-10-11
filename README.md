@@ -107,6 +107,7 @@ npm test
 - daemon 直接处理（原子改写 `config.json`、立即生效，不用重启），不交给 Muse；
 - 没授权的群 @机器人 时，`debug.log` 里 `daemon.blocked_not_allowed` 带着该群的 `chatId`，想手动加可以从这里找；
 - 授权群里的文字、语音、图片、文件、卡片点击、`/stop` `/clear` `/compact` 都和主人一样可用；群里是一份共用的上下文，hook 会记下每轮是谁说的；
+- 群成员和主人共用同一个 Muse：hook 提示词要求 worker 按 `senderUserId` 认主人（自称主人不算），群里不是主人的人要求时不改 `config.json`（加人、授权群只走上面的命令）、不读不发凭证、不删文件、不改配置；
 - `npm run check-config` 和 `npm run doctor` 会显示授权群个数。
 
 环境变量 `MUSE_WECOM_ROOT` 可覆盖运行目录（默认是仓库目录，即 `dist/` 的上一级）；daemon、keepalive.sh、早报脚本都认它。
