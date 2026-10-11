@@ -69,7 +69,7 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建一个轮询 hook。`hooks/` 目录已备好：
 
 - `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接没装在 `~/workspace/muse-wecom-bridge` 的话改脚本里的 `BRIDGE_ROOT`（hook 定义 prompt 里的路径也一起改）
-- `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；`poll_interval_secs` 用 5（hook 允许的最小值）
+- `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑；`poll_interval_secs` 用 5（hook 允许的最小值）
 - 轮询脚本原子认领（`<id>.json` → `<id>.json.claimed`）后 `wake`；worker 读 claimed → 写 outbox（先 `.tmp` 再 mv）→ 删 claimed
 - claimed 25 分钟没被消费会被重新认领
 
