@@ -11,7 +11,7 @@
 ## 运行要求
 
 - Node.js 18+
-- 企业微信管理后台建**智能机器人**（工作台 → 智能机器人 → API 模式 → 长连接），拿到 BotID 和 Secret
+- 一个企业微信**智能机器人**（API 模式 + 长连接）：`npm run onboard` 扫码自动建，或手动建后拿 BotID 和 Secret
 - 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）
 
 ## 部署
@@ -20,14 +20,22 @@
 git clone https://github.com/caichengle666/muse-wecom-bridge && cd muse-wecom-bridge
 npm install
 npm run build && npm test
-npm run onboard   # 终端出二维码，让用户用手机企业微信扫码「一键创建智能机器人」；自动写 secrets.env，并在 config.json 生成 8 位配对码
-# 扫码不可用时手动：cp secrets.env.example secrets.env 填 WECOM_BOT_ID/SECRET（chmod 600）；cp config.example.json config.json 填 allowedUserIds
+npm run onboard   # 后台运行，见下；扫码不可用时走「扫码失败时」
+npm run check-config
 bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
 # 注册 hook（见下文「消息处理 hook」）后：
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
 
 部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机企业微信**私聊机器人：扫码建的先发 onboard 打印的配对码（回"配对成功"即进白名单），再随便发一条，收到回复才算真的通了。
+
+`npm run onboard` 的做法（Muse 照做）：
+
+1. 后台运行 `npm run onboard > onboard.log 2>&1 &`（最多等 5 分钟）；几秒后日志里出现 `https://work.weixin.qq.com/ai/qc/gen?...` 链接，同时生成 `onboard-qr.png`
+2. **把 `onboard-qr.png` 图片发给用户**（附上链接），请用户用**手机企业微信**扫码，按提示点「一键创建智能机器人」
+3. 日志出现"成功"后：Bot ID / Secret 已写入 `secrets.env`（600），日志里有一行 `配对码：XXXXXXXX`（8 位，也写在 `config.json` 的 `pairCode`）
+4. 扫码拿不到扫码人的 userid，所以白名单靠配对码补：daemon 起来后，**把配对码告诉用户，让他在企业微信里私聊机器人发这个码**；机器人回"配对成功"即自动写进 `allowedUserIds`、配对码作废。配对前别人发消息只收到"还没绑定主人"；群里发码不算
+5. 日志出现"扫码超时"就重新运行；secrets.env 里已有机器人会被新的替换（扫码只能新建，不能接管已有机器人）
 
 ## 扫码失败时
 
@@ -55,6 +63,23 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - `/compact [重点]`（群里 `@机器人 /compact` 也行）：手动压缩，这条本身不进历史；上下文带 `compact: true`、`compact_hint`、`size_bytes`，并强制 `compress_needed: true`，worker 把 summary 和除最近 2 轮外的带 seq 的轮压成摘要，照常写 `wecom-ctx-<ctx_key>.summary.json`；还在处理中的任务（没 seq 的）不动，回复后照常入历史
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 单聊和每个群各自一份；群里多人说话时不区分是谁
+
+## 流式输出（打字机效果，0.2.0+）
+
+长回复可以边写边让用户看到：处理过程中往 `stream/<messageId>.jsonl` 追加，每行一个 JSON：`{"text":"这一段内容\n\n"}`。
+
+- 直接追加即可，没写完的半行会等写完再显示
+- daemon 把累计内容推到"收到，正在处理"那条流式消息上（同一 stream 整体覆盖），每 3 秒最多刷新一次（企业微信会话限频约 30 条/分钟）
+- **最后仍然必须写 `outbox/<id>.json`（完整正文）**，它到达后同一条消息定格成最终回复、stream 文件自动删除；只写 stream 不写 outbox，用户收不到最终结果
+- 企业微信流式消息 10 分钟内必须收尾，daemon 在 9 分钟时主动收尾，之后的正式回复另发一条
+- `/stop`、超时、出错都会收尾；`config.json` 设 `"streamReplies": false` 可关闭
+
+## 保活与自检
+
+- daemon：心跳 30 秒、连续 2 次没收到 pong 判断线并无限重连；被顶号自动退出，由保活拉起
+- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起；`--uninstall-cron` 移除
+- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- `npm run doctor`：只读自检，有 FAIL 退出码 1；"白名单等待配对"是 WARN，配对完就消失
 
 ## 外部影响
 
