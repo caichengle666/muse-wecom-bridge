@@ -2,6 +2,8 @@
 
 ## 0.1.4
 
+- （后补，未改版本号）桥接健康检查：hook 在没有新消息时顺便看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/卡死/一直连不上，keepalive 也没救回来）就唤醒 worker（payload 带 `health_issue`），worker 先跑 keepalive 拉起、看日志修复，再报告结果；同一个故障每小时最多提醒一次，恢复后自动复位
+
 - 新增 `/stop`（群里 `@机器人 /stop` 也行）：发现指令发错了时立刻中断本会话里所有还没回完的任务，之后直接发新指令即可（与 muse-feishu-bridge 0.3.12 一致）
   - daemon 收到就处理，不进 inbox、不等 hook 轮询：被中断消息的 inbox 文件（未认领或已认领）移到 `expired/` 并留 `<id>.stopped`，等待立即结束、不发"超时"提示，写墓碑，写 `stop/<会话>.json`
   - 被中断任务的回复（之后才写出的、正在分段发送的）一律不再发出
