@@ -1,5 +1,9 @@
 # 更新日志
 
+## 0.1.3
+
+- 上下文上限改为 512KB（UTF-8 字节，含摘要），超限自动压缩；上下文改写到 `~/hooks/state/wecom-wake-*.json`，payload 只带 `context_file`，避免撞 wake 参数长度限制；单条上限 8000 字
+
 ## 0.1.2
 
 - hook 上下文与 muse-feishu-bridge 0.3.10 对齐：历史只由脚本写（worker 交 `.summary.json` / `.clear.json` 请求文件，脚本合并，不会互相覆盖）；按字数限制 30000（含摘要），超限让 worker 压缩，2 倍兜底丢最旧的；`/clear` 认领时直接归档；flock 单实例；附件记文件名
