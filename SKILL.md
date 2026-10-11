@@ -14,6 +14,17 @@
 - 一个企业微信**智能机器人**（API 模式 + 长连接）：`npm run onboard` 扫码自动建，或手动建后拿 BotID 和 Secret
 - 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）
 
+## 部署前先问用户（必须等回答再往下走）
+
+开始装之前，把下面几个选择**一条消息**发给用户，每项写明推荐项；用户回「默认」就全用推荐值。**用户没回答前不要执行任何安装命令**，选完把结果写进 `config.json` 再继续：
+
+1. **创建方式**：A 扫码新建机器人（推荐，凭证自动写好）；B 已有智能机器人，用户提供 Bot ID / Secret（扫码只能新建，不能接管已有的）
+2. **谁能用**：A 只有用户自己，扫码后用配对码绑定（推荐）；B 机器人可见范围内的人都能用（`allowAll: true`，所有人的消息都会交给 Muse 处理，慎选）
+3. **流式回复**：A 开，长回复边写边显示（推荐）；B 关，写完一次发出（`streamReplies: false`）
+4. **开机自启保活**：A 装 cron（推荐，`keepalive.sh --install-cron`）；B 不装，只靠 hook 兜底拉起
+
+中途遇到上面没覆盖、但会影响用户的选择（例如 `secrets.env` 里已有机器人、重新扫码会替换它），同样先问再做。
+
 ## 部署
 
 ```bash
@@ -22,7 +33,7 @@ npm install
 npm run build && npm test
 npm run onboard   # 后台运行，见下；扫码不可用时走「扫码失败时」
 npm run check-config
-bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
+bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻（第 4 项选 B 就去掉 --install-cron 那半句）
 # 注册 hook（见下文「消息处理 hook」）后：
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
