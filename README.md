@@ -218,6 +218,8 @@ worker 写长回复时边写边往 `stream/<id>.jsonl` 追加，每次一整行 
 检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，长连接、文件下载、onboard 统一走同一个 CONNECT 隧道（复用连接）；遵守 `NO_PROXY`。
 `config.json` 里 `"proxy": "off"` 强制直连，填 `"http://host:port"` 则覆盖环境变量。`npm run check-config` 会显示实际出网方式并经代理探测网关。
 
+**Muse 沙盒**：沙盒的出网代理会拦 node 的 CONNECT 请求，直接用 `HTTPS_PROXY` 会握手超时。做法是在本机起一个出网中转（例如 `127.0.0.1:19081`），`config.json` 写 `"proxy": "http://127.0.0.1:19081"`，check-config 确认后重启 daemon；中转要和 daemon 一起常驻。
+
 ## 排障手册（都是真踩过的坑）
 
 先跑 `npm run doctor`，按 FAIL 项修。
