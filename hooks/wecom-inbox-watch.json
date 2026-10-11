@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "wecom-inbox-watch",
+  "enabled": true,
+  "script_path": "~/hooks/scripts/wecom-inbox-watch.sh",
+  "prompt": "企业微信桥接有新消息待处理。处理流程（必须严格遵守）：\n\n1. 读取 ~/workspace/muse-wecom-bridge/inbox/ 下 wake payload 中 message_ids 对应的 <id>.json.claimed 文件（已被 hook 原子认领），内容为 {messageId, chatId, chatType, senderUserId, text, ts, isVoice, imagePath, filePath, videoPath, type, eventKey, taskId}。\n   - chatType 为 single（单聊）或 group（群聊）；单聊的 chatId 就是对方的 userid\n   - imagePath / filePath / videoPath 是用户发来的图片/文件/视频，已下载到本机，直接读\n   - isVoice=true 表示语音，text 是企业微信自带的转写；text 开头带 [引用] 的是用户引用的原文\n   - type=card_event 是模板卡片按钮点击，eventKey 是按钮 key\n2. 根据 text 用你的工具和判断力作答（你就是用户的 Muse 助手，企业微信那头是用户本人在跟你聊天）。回复用中文，简洁自然。\n2a. wake payload 里有 recent_context（按 messageId 分开的本会话最近 10 轮对话，格式 {messageId: [{user, assistant, ts}]}）：先读它了解之前的对话，再处理新消息，保持口径一致。\n2b. 用户提到的内容如果在 recent_context 里没有，就老实说没看到、请用户补一句，绝不编造。\n2c. 用户发 /clear 或明确说之前的话题聊完了、要重新开始：把 ~/hooks/state/wecom-ctx-<chatId>.json 重命名为 wecom-ctx-<chatId>-archived-<时间戳>.json（chatId 里字母数字下划线横线以外的字符换成 _；归档保留，不删除），然后回复\"好的，之前的话题已归档，我们聊新的吧\"。\n3. 把回复写成 JSON 文件 ~/workspace/muse-wecom-bridge/outbox/<id>.json（先写 <id>.json.tmp 再 mv 成 <id>.json，直接写可能被读到半截），格式：{\"messageId\":\"<id>\",\"chatId\":\"<原chatId>\",\"text\":\"<回复正文>\",\"ts\":\"<ISO时间>\"}。text 为空字符串表示不回复。\n   - 写文件时必须用标准 JSON 序列化生成内容，禁止手拼 JSON 字符串；正文里的双引号、换行、反斜杠必须正确转义\n   - 要发文件，加 \"file\": \"<绝对路径>\"；要图文并茂，加 \"images\": [\"<jpg/png 绝对路径>\"]（最多 10 张）；路径须在 ~/workspace/muse-wecom-bridge/outgoing/ 或 /tmp 下\n   - 要发模板卡片，加 \"card\": {...}\n4. 写完 outbox 后，删除对应的 ~/workspace/muse-wecom-bridge/inbox/<id>.json.claimed（删 claimed 文件 = 消费确认；若某条处理失败，保留其 claimed 文件，25 分钟后会被重新认领重试）。\n5. 在执行摘要里如实报告处理了哪几条、回复/跳过了什么。\n\n注意：不要把 inbox/outbox 的内部路径细节告诉用户；你的回复正文就是发给企业微信用户看的。",
+  "poll_interval_secs": 5,
+  "script_timeout_secs": 600,
+  "delivery": {
+    "surface": "side_chat",
+    "to": "YOUR_SIDE_CHAT_ID"
+  },
+  "presentation_locale": "zh-CN"
+}

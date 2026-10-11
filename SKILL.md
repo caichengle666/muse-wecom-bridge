@@ -40,6 +40,24 @@ Muse 会在浏览器里帮你走完：
 
 白名单要填你自己的企业微信 userid（一般在管理后台通讯录里能看到，不知道的话让 Muse 帮你找），填进 `config.json` 的 `allowedUserIds` 后重启。
 
+## 消息处理 hook（部署时必建）
+
+inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建一个轮询 hook。`hooks/` 目录已备好：
+
+- `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接没装在 `~/workspace/muse-wecom-bridge` 的话改脚本里的 `BRIDGE_ROOT`（hook 定义 prompt 里的路径也一起改）
+- `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；`poll_interval_secs` 用 5（hook 允许的最小值）
+- 轮询脚本原子认领（`<id>.json` → `<id>.json.claimed`）后 `wake`；worker 读 claimed → 写 outbox（先 `.tmp` 再 mv）→ 删 claimed
+- claimed 25 分钟没被消费会被重新认领
+
+### 多轮上下文
+
+每次 wake 都是全新 worker，默认看不到上次聊了什么。轮询脚本自己维护上下文，桥接代码不用改：
+
+- 认领时记下 chatId 和用户原文；回复归档到 `sent/` 后，把这一轮追加到 `~/hooks/state/wecom-ctx-<chatId>.json`
+- 唤醒时按 messageId 把本会话最近 10 轮（≤ 8000 字，单条 ≤ 2000 字）放进 payload 的 `recent_context`；同一会话还没回完的前几条也会带上
+- 单聊按对方 userid、群按 chatid 分开，互不串；群里多人说话时不区分是谁说的
+- 发送失败、超时作废的不记；用户发 `/clear` 时 worker 把历史归档（保留 30 天）；普通历史 7 天没动自动删
+
 ## 外部影响
 
 - 本机主动向外建 WebSocket 长连接（`wss://openws.work.weixin.qq.com`），无需公网回调地址

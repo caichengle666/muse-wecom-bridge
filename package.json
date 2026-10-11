@@ -15,5 +15,5 @@
     "test": "tsc && node --test --test-concurrency=1 dist/test/*.test.js"
   },
   "type": "module",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

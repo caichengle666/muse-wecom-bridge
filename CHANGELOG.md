@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.1.1
+
+- 新增 `hooks/wecom-inbox-watch.sh` + `hooks/wecom-inbox-watch.json`：Muse 侧轮询 hook 模板，自带多轮上下文（`recent_context`，按会话最近 10 轮），`/clear` 归档重开；桥接代码无改动
+- SKILL.md / README 补 hook 安装与上下文说明
+
 ## 0.1.0
 
 修复（P1）
