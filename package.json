@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "@wecom/aibot-node-sdk": "^1.0.7",
+    "https-proxy-agent": "^7.0.6",
     "qrcode": "^1.5.4"
   },
   "description": "WeCom (企业微信) 智能机器人长连接桥接 for the Muse platform (file-queue backend)",
@@ -22,5 +23,5 @@
     "onboard": "node dist/onboard.js"
   },
   "type": "module",
-  "version": "0.3.1"
+  "version": "0.3.2"
 }

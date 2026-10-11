@@ -123,3 +123,21 @@ test("#9 白名单：示例占位、前后带空格的 userid 校验报错；判
   assert.ok(makeIsAllowed({ allowedUserIds: [" alice "] })("alice"));
   assert.ok(!makeIsAllowed({ allowedUserIds: [EXAMPLE_USERID] })(EXAMPLE_USERID));
 });
+
+test("代理选择：HTTPS_PROXY 生效、NO_PROXY 命中直连、config 可强制 off / 覆盖；配置校验拒绝非法 proxy", async () => {
+  const { chooseProxy, applyAxiosProxy } = await import("../proxy.js");
+  const { validateConfig } = await import("../config.js");
+  const T = "https://openws.work.weixin.qq.com";
+  assert.equal(chooseProxy(T, undefined, {}).url, null);
+  assert.equal(chooseProxy(T, undefined, { HTTPS_PROXY: "http://u:p@px:3128" }).label, "http://px:3128");
+  assert.equal(chooseProxy(T, undefined, { HTTPS_PROXY: "http://px:1", NO_PROXY: ".weixin.qq.com" }).url, null);
+  assert.equal(chooseProxy(T, "off", { HTTPS_PROXY: "http://px:1" }).url, null);
+  assert.equal(chooseProxy(T, "http://cfg:8080", { HTTPS_PROXY: "http://px:1" }).url, "http://cfg:8080");
+  const d: Record<string, unknown> = {};
+  applyAxiosProxy(d, undefined);
+  assert.equal(d.proxy, false);
+  assert.equal(d.httpsAgent, undefined);
+  const base = { allowedUserIds: ["zhangsan"] };
+  assert.equal(validateConfig({ ...base, proxy: "socks5://x" }).errors.length, 1);
+  assert.equal(validateConfig({ ...base, proxy: "http://127.0.0.1:7890" }).errors.length, 0);
+});

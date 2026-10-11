@@ -5,6 +5,8 @@ import { randomBytes } from "node:crypto";
 
 export interface BridgeConfig {
   wsUrl?: string;
+  /** 出网代理："auto"（默认，读 HTTPS_PROXY / NO_PROXY）、"off"（强制直连）或代理 URL */
+  proxy?: string;
   /**
    * 允许与机器人对话的企业微信 userid。
    * 0.2.0 起 fail-closed：为空时 daemon 拒绝启动，除非显式设置 allowAll: true。
@@ -101,6 +103,9 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   }
   if (list.length && cfg.allowAll === true) {
     warnings.push("allowedUserIds 非空时以白名单为准，allowAll 被忽略");
+  }
+  if (cfg.proxy !== undefined && cfg.proxy !== "auto" && cfg.proxy !== "off" && !/^https?:\/\/[^\s]+$/i.test(String(cfg.proxy))) {
+    errors.push('proxy 只能是 "auto"、"off" 或 http(s):// 开头的代理地址');
   }
   if (cfg.replyTimeoutMin !== undefined && !(typeof cfg.replyTimeoutMin === "number" && cfg.replyTimeoutMin > 0)) {
     errors.push("replyTimeoutMin 必须是正数");

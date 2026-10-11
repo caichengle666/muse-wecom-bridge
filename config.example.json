@@ -3,6 +3,7 @@
   "allowAll": false,
   "replyTimeoutMin": 20,
   "wsUrl": "wss://openws.work.weixin.qq.com",
+  "proxy": "auto",
   "allowedFileRoots": [],
   "logMessageText": false
 }

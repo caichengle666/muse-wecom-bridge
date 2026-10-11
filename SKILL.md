@@ -38,6 +38,8 @@ bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻（第 4 项选 
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
 
+只能经代理出网的机器：保持环境里的 `HTTPS_PROXY` 即可（长连接、文件下载、onboard 都会走它），或在 `config.json` 写 `"proxy": "http://host:port"`；check-config 的「出网」一行显示实际方式。
+
 部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机企业微信**私聊机器人：扫码建的先发 onboard 打印的配对码（回"配对成功"即进白名单），再随便发一条，收到回复才算真的通了。
 
 `npm run onboard` 的做法（Muse 照做）：

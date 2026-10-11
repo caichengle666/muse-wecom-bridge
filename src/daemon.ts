@@ -9,6 +9,7 @@
  * Get them at: 企业微信管理后台 → 工作台 → 智能机器人 → 新建 → API 模式 → 长连接.
  */
 import { mkdir } from "node:fs/promises";
+import https from "node:https";
 import tls from "node:tls";
 import { WSClient } from "@wecom/aibot-node-sdk";
 import { MuseBackend } from "./muse-backend.js";
@@ -21,13 +22,23 @@ import { acquireInstanceLock, releaseInstanceLock } from "./lock.js";
 import { OutboxStore } from "./outbox.js";
 import { createBridge, type BotClient } from "./bridge.js";
 import { resolveAllowedRoots } from "./files.js";
+import { agentFor, applyAxiosProxy } from "./proxy.js";
 
-/** TLS reachability probe for the WeCom long-connection gateway. */
-function probeGateway(wsUrl: string, timeoutMs = 8000): Promise<{ ok: boolean; detail: string }> {
+/** 长连接网关的 TLS 连通性探测；走代理时经 CONNECT 隧道发一个 HTTPS 请求，收到任何响应即算通。 */
+function probeGateway(wsUrl: string, agent: https.Agent | undefined, timeoutMs = 8000): Promise<{ ok: boolean; detail: string }> {
   return new Promise((resolve) => {
     const m = wsUrl.match(/^wss:\/\/([^/:]+)(?::(\d+))?/);
     if (!m) return resolve({ ok: false, detail: "wsUrl 格式无法解析" });
     const host = m[1], port = Number(m[2] || 443);
+    if (agent) {
+      const req = https.get({ host, port, path: "/", agent, timeout: timeoutMs }, (res) => {
+        res.resume();
+        resolve({ ok: true, detail: `经代理 TLS 握手成功（HTTP ${res.statusCode}）` });
+      });
+      req.on("timeout", () => req.destroy(new Error("连接超时")));
+      req.on("error", (e) => resolve({ ok: false, detail: `经代理连接失败: ${e.message}` }));
+      return;
+    }
     const s = tls.connect(port, host, { servername: host }, () => {
       const subject = s.getPeerCertificate()?.subject as { CN?: string } | undefined;
       s.end();
@@ -58,6 +69,7 @@ async function main(): Promise<void> {
     fail(e instanceof Error ? e.message : String(e));
   }
   const wsUrl = cfg.wsUrl || "wss://openws.work.weixin.qq.com";
+  const { agent, choice: proxy } = agentFor(wsUrl.replace(/^wss:/i, "https:"), cfg.proxy);
 
   let secrets = { botId: "", botSecret: "" };
   try {
@@ -78,9 +90,10 @@ async function main(): Promise<void> {
     console.log("配置检查通过: config.json 与 secrets.env 有效（未连接企业微信）。");
     console.log(`  ROOT=${paths.root}`);
     console.log(`  wsUrl=${wsUrl}`);
+    console.log(`  出网: ${proxy.label}`);
     console.log(`  白名单: ${list.length ? list.join(",") : pairingPending(cfg) ? "等待配对（私聊机器人发送配对码）" : "allowAll=true（对所有人开放）"}`);
     console.log(`  允许外发文件目录: ${resolveAllowedRoots(paths.root, cfg.allowedFileRoots).join(", ")}`);
-    const probe = await probeGateway(wsUrl);
+    const probe = await probeGateway(wsUrl, agent);
     console.log(`  网关连通性: ${probe.ok ? "OK" : "FAIL"}（${probe.detail}）`);
     process.exit(probe.ok ? 0 : 3);
   }
@@ -138,9 +151,15 @@ async function main(): Promise<void> {
     botId: secrets.botId,
     secret: secrets.botSecret,
     wsUrl,
+    ...(agent ? { wsOptions: { agent } } : {}),
     maxReconnectAttempts: -1, // 网络断开无限重连（被顶号 SDK 不会重连，由 bridge 退出交给 keepalive）
     logger: { debug: () => undefined, info: sdkLog("info"), warn: sdkLog("warn"), error: sdkLog("error") },
   });
+
+  // 文件下载走 SDK 内部的 axios：关掉它自带的代理逻辑，统一用同一个 CONNECT 隧道（或真正直连）
+  const api = (wsClient as unknown as { api?: { httpClient?: { defaults?: Record<string, unknown> } } }).api;
+  if (api?.httpClient?.defaults) applyAxiosProxy(api.httpClient.defaults, agent);
+  log("daemon.proxy", { via: proxy.label, source: proxy.source });
 
   const bridge = createBridge({
     client: wsClient as unknown as BotClient,

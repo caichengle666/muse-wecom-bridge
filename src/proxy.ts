@@ -1,0 +1,91 @@
+/**
+ * 出网代理。企业微信 SDK 的长连接（ws）和文件下载（axios）、onboard 的 fetch 对代理的处理不一样：
+ * - ws 和 Node 内置 fetch 完全不读代理变量 → 只能经代理出网的环境里连不上；
+ * - axios 会自己读 HTTPS_PROXY，但对 https 目标走"绝对 URI 转发"而不是 CONNECT 隧道，部分代理不支持。
+ * 这里统一成：有代理就给三者都挂同一个 CONNECT 隧道 agent（https-proxy-agent），并关闭 axios 自带的代理逻辑。
+ * 遵守 NO_PROXY；config.proxy = "off" 可强制直连，填 URL 则覆盖环境变量。
+ */
+import https from "node:https";
+import { HttpsProxyAgent } from "https-proxy-agent";
+
+export interface ProxyChoice {
+  url: string | null;
+  /** 去掉账号密码后的代理地址，用于日志 */
+  label: string;
+  source: "config" | "env" | "none" | "off" | "no_proxy";
+}
+
+function noProxyMatch(host: string, noProxy: string): boolean {
+  for (const raw of noProxy.split(",")) {
+    const p = raw.trim().toLowerCase().replace(/:\d+$/, "");
+    if (!p) continue;
+    if (p === "*") return true;
+    const suf = p.startsWith(".") ? p : `.${p}`;
+    if (host === p.replace(/^\./, "") || host.endsWith(suf)) return true;
+  }
+  return false;
+}
+
+export function redact(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "(无法解析)";
+  }
+}
+
+export function chooseProxy(target: string, cfgProxy: string | undefined, env: NodeJS.ProcessEnv = process.env): ProxyChoice {
+  if (cfgProxy === "off") return { url: null, label: "直连（config.proxy=off）", source: "off" };
+  if (cfgProxy && cfgProxy !== "auto") return { url: cfgProxy, label: redact(cfgProxy), source: "config" };
+  const host = new URL(target).hostname.toLowerCase();
+  const np = env.NO_PROXY ?? env.no_proxy ?? "";
+  if (np && noProxyMatch(host, np)) return { url: null, label: "直连（NO_PROXY）", source: "no_proxy" };
+  const url = env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || "";
+  if (!url || !/^https?:\/\//i.test(url)) return { url: null, label: "直连", source: "none" };
+  return { url, label: redact(url), source: "env" };
+}
+
+export function makeProxyAgent(url: string): HttpsProxyAgent<string> {
+  // keepAlive 复用 CONNECT 隧道：部分出口代理新建隧道偶发 hang，复用能少碰到；偶发 hang 由调用方超时重试兜底。
+  return new HttpsProxyAgent(url, { keepAlive: true });
+}
+
+/**
+ * 给 axios 默认配置挂代理：始终关掉 axios 自己读 HTTP(S)_PROXY 的逻辑（proxy=false），
+ * 有代理时用 CONNECT 隧道 agent；没有（"off"、NO_PROXY、未配置）就是真正直连。
+ */
+export function applyAxiosProxy(defaults: Record<string, unknown>, agent: object | undefined): void {
+  defaults.proxy = false;
+  if (agent) {
+    defaults.httpsAgent = agent;
+    defaults.httpAgent = agent;
+  }
+}
+
+/** 按 chooseProxy 的结果给目标 URL 生成 agent（直连时 undefined）。 */
+export function agentFor(target: string, cfgProxy: string | undefined): { agent?: HttpsProxyAgent<string>; choice: ProxyChoice } {
+  const choice = chooseProxy(target, cfgProxy);
+  return { agent: choice.url ? makeProxyAgent(choice.url) : undefined, choice };
+}
+
+/** GET 一个 https JSON 接口，按配置走代理（Node 内置 fetch 不读代理变量）。 */
+export function getJson(url: string, cfgProxy: string | undefined, timeoutMs = 15_000): Promise<unknown> {
+  const { agent } = agentFor(url, cfgProxy);
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { agent, timeout: timeoutMs }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => {
+        if ((res.statusCode || 0) >= 400) return reject(new Error(`HTTP ${res.statusCode}`));
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("请求超时")));
+    req.on("error", reject);
+  });
+}

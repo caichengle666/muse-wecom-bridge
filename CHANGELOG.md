@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.3.2
+
+- 新增出网代理支持（同飞书桥）：检测到 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 时，长连接、文件下载、onboard 扫码接口统一走 CONNECT 隧道（keepAlive 复用）；遵守 `NO_PROXY`；`config.json` 新增 `proxy`（`auto` / `off` / 代理 URL）。以前长连接和 onboard 不认代理变量，只能经代理出网的机器上连不上
+- check-config 显示出网方式，走代理时经隧道探测网关
+- 升级：git pull && npm ci && npm run build，重启 daemon
+
 ## 0.3.1
 
 - 修复：等回复超时后，消息不会再被 hook 重新认领执行（以前 25 分钟后会再唤醒一个 worker 跑同一条，长任务可能同时跑两遍）。超时时 inbox 文件移到 `expired/` 并留 `<id>.timeout`，还在跑的 worker 看到 `.claimed` 不见了就停；hook 跳过有墓碑的消息；认领有效期改为按 `replyTimeoutMin` + 5 分钟计算

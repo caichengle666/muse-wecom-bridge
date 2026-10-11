@@ -87,6 +87,7 @@ npm test
 | `allowAll` | `false` | 显式对所有人开放（仅当列表为空时生效，不推荐） |
 | `replyTimeoutMin` | `20` | 等助手回复的分钟数，超时后写墓碑、迟到回复不再补发，这条消息也不会再被 hook 重新认领执行 |
 | `wsUrl` | `wss://openws.work.weixin.qq.com` | 长连接网关 |
+| `proxy` | `auto` | `auto` 读 HTTPS_PROXY / NO_PROXY；`off` 强制直连；或填 `http://host:port` |
 | `allowedFileRoots` | `[<ROOT>/outgoing, os.tmpdir(), /tmp]` | outbox `file`/`images` 允许的目录（支持 `~/`）；realpath 后比对 |
 | `logMessageText` | `false` | 为 `true` 时 debug.log 记录消息原文（截断 300 字） |
 | `streamReplies` | `true` | 流式打字机，见"流式输出" |
@@ -210,6 +211,12 @@ worker 写长回复时边写边往 `stream/<id>.jsonl` 追加，每次一整行 
 - 流式消息从首次发送起 10 分钟内必须结束：快到 9 分钟还没写完就先收尾（注明"完成后另发"），正式回复另发新消息；刷新失败也自动改为另发
 - 被 `/stop`、超时、出错时流式消息会收尾，不会一直显示"生成中"
 - `config.json` 设 `"streamReplies": false` 关闭
+
+## 出网代理
+
+长连接用的 `ws` 库和 onboard 用的 Node 内置 fetch 都**不读**代理变量，只能经代理出网的机器上会连不上。
+检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，长连接、文件下载、onboard 统一走同一个 CONNECT 隧道（复用连接）；遵守 `NO_PROXY`。
+`config.json` 里 `"proxy": "off"` 强制直连，填 `"http://host:port"` 则覆盖环境变量。`npm run check-config` 会显示实际出网方式并经代理探测网关。
 
 ## 排障手册（都是真踩过的坑）
 

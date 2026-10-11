@@ -21,6 +21,7 @@ import QRCode from "qrcode";
 import { makePaths, resolveRoot } from "./paths.js";
 import { cleanUserIds, isPlaceholder, newPairCode, parseEnvFile } from "./config.js";
 import { atomicWriteJson } from "./fsutil.js";
+import { getJson } from "./proxy.js";
 
 const BASE = "https://work.weixin.qq.com/ai/qc";
 const POLL_MS = 3000;
@@ -37,13 +38,8 @@ export interface QrSession {
 
 type Fetch = (url: string) => Promise<unknown>;
 
-const fetchJson: Fetch = async (url) => {
-  const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-};
 
-export async function createQr(get: Fetch = fetchJson): Promise<QrSession> {
+export async function createQr(get: Fetch): Promise<QrSession> {
   const resp = (await get(`${BASE}/generate?source=wecom-cli&plat=${platCode()}`)) as { data?: { scode?: string; auth_url?: string } };
   const scode = resp?.data?.scode;
   const authUrl = resp?.data?.auth_url;
@@ -54,7 +50,7 @@ export async function createQr(get: Fetch = fetchJson): Promise<QrSession> {
 /** 轮询扫码结果；超时返回 null。 */
 export async function pollBot(
   scode: string,
-  get: Fetch = fetchJson,
+  get: Fetch,
   opts: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<{ botId: string; secret: string } | null> {
   const pollMs = opts.pollMs ?? POLL_MS;
@@ -128,7 +124,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (oldId && !isPlaceholder(oldId)) console.log(`[onboard] 注意：secrets.env 里已有机器人 ${mask(oldId)}，扫码成功后会被新机器人替换`);
 
-  const qr = await createQr();
+  const proxy = typeof cfg.proxy === "string" ? cfg.proxy : undefined;
+  const get: Fetch = (url) => getJson(url, proxy);
+  const qr = await createQr(get);
   const qrPath = join(paths.root, "onboard-qr.png");
   console.log("[onboard] 用手机企业微信扫下面的二维码，按提示「一键创建智能机器人」：");
   try {
@@ -141,7 +139,7 @@ async function main(argv: string[]): Promise<number> {
   console.log(`[onboard] 也可以在电脑浏览器打开这个页面扫码：${BASE}/gen?source=wecom-cli&scode=${qr.scode}`);
   console.log("[onboard] 等待扫码（5 分钟内有效）…");
 
-  const bot = await pollBot(qr.scode);
+  const bot = await pollBot(qr.scode, get);
   await rm(qrPath, { force: true }).catch(() => undefined);
   if (!bot) {
     console.error("[onboard] 扫码超时，重新运行生成新的二维码（没有改动任何文件）");
