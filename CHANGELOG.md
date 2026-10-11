@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.1.2
+
+- hook 上下文与 muse-feishu-bridge 0.3.10 对齐：历史只由脚本写（worker 交 `.summary.json` / `.clear.json` 请求文件，脚本合并，不会互相覆盖）；按字数限制 30000（含摘要），超限让 worker 压缩，2 倍兜底丢最旧的；`/clear` 认领时直接归档；flock 单实例；附件记文件名
+- 修复：过期认领回收后 mtime 不变，之后每 5 秒重复唤醒同一条
+
 ## 0.1.1
 
 - 新增 `hooks/wecom-inbox-watch.sh` + `hooks/wecom-inbox-watch.json`：Muse 侧轮询 hook 模板，自带多轮上下文（`recent_context`，按会话最近 10 轮），`/clear` 归档重开；桥接代码无改动
