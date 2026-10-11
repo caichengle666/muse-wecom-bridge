@@ -4,13 +4,13 @@
  * 不直接 new WSClient：客户端由调用方注入（daemon.ts 传真实 WSClient，测试传假客户端），
  * 因而所有路由、白名单、投递、排空、卡片回调、被顶号处理都可以离线测试。
  */
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { MuseBackend, InboxItem } from "./muse-backend.js";
 import type { BridgeConfig } from "./config.js";
-import { makeIsAllowed, pairingPending } from "./config.js";
+import { cleanUserIds, makeIsAllowed, pairingPending } from "./config.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./logger.js";
 import { CardEventDedupe, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
@@ -168,7 +168,7 @@ export function buildAckCard(
 
 /**
  * 卡片事件的 inbox messageId（0.2.1）：由去重键（+ 回调 msgid，若有）确定性地派生，不再用 Date.now()。
- * 若同一 id 之前的一轮已经结束（sent/failed/expired 里有），追加 -r<n>，避免 TTL 过后再次点击被当成"已发送"。
+ * 若同一 id 之前的一轮已经结束（sent/failed/expired 里有，或有墓碑），追加 -r<n>，避免 TTL 过后再次点击被当成"已发送"。
  */
 export function cardEventMessageId(key: string, evMsgid: string, taken: (id: string) => boolean = () => false): string {
   const base = `card-${createHash("sha256").update(`${key}|${evMsgid}`).digest("hex").slice(0, 24)}`;
@@ -236,12 +236,14 @@ export function createBridge(d: BridgeDeps) {
     lastPushAt = 0;
     lastText = "";
     closed = false;
+    /** 第一次推送已排队（回执还没回来）：此后的推送都串在它后面，收尾一定发得出去 */
+    private queued = false;
     private chain: Promise<unknown> = Promise.resolve();
 
     constructor(private readonly frame: Frame, private readonly msgid: string) {}
 
     get open(): boolean {
-      return this.startedAt > 0 && !this.closed;
+      return (this.startedAt > 0 || this.queued) && !this.closed;
     }
 
     push(content: string, finish: boolean): Promise<boolean> {
@@ -262,6 +264,7 @@ export function createBridge(d: BridgeDeps) {
           return false;
         }
       };
+      if (!this.closed) this.queued = true;
       const p = this.chain.then(run, run);
       this.chain = p.catch(() => undefined);
       return p;
@@ -376,7 +379,12 @@ export function createBridge(d: BridgeDeps) {
           log("daemon.tombstone_error", { msgid, error: errText(e) });
           return "error";
         });
-        log("daemon.reply_timeout", { msgid, owner });
+        // inbox 文件移到 expired/、留 <id>.timeout：hook 不会再认领重跑，还在跑的 worker 看到 .claimed 不见了就停
+        const inbox = await backend.retire(msgid, new Date().toISOString(), paths.expired, "timeout").catch((e) => {
+          log("daemon.retire_error", { msgid, error: errText(e) });
+          return "error";
+        });
+        log("daemon.reply_timeout", { msgid, owner, inbox });
         const msg = "刚才处理超时了，麻烦再发一次吧。";
         if (!(stream?.open && (await stream.push(msg, true)))) await replyStreamText(frame, msg).catch(() => undefined);
         return { status: "timeout" };
@@ -390,8 +398,26 @@ export function createBridge(d: BridgeDeps) {
     }
   }
 
+  /** inbox 里属于该会话的消息 ID（<id>.json 未认领、<id>.json.claimed 已认领） */
+  async function inboxIdsOf(chatKey: string): Promise<string[]> {
+    const names = await readdir(paths.inbox).catch(() => [] as string[]);
+    const ids: string[] = [];
+    for (const n of names) {
+      const m = /^(.+)\.json(?:\.claimed)?$/.exec(n);
+      if (!m) continue;
+      try {
+        const d = JSON.parse(await readFile(join(paths.inbox, n), "utf8")) as { chatId?: unknown };
+        if (String(d.chatId ?? "") === chatKey) ids.push(m[1]);
+      } catch {
+        /* 刚被移走 / 半截：跳过 */
+      }
+    }
+    return ids;
+  }
+
   /**
-   * /stop：中断本会话里所有还在等回复的消息（daemon 收到就处理，不进 inbox、不等 hook 轮询）。
+   * /stop：中断本会话里所有还没回完的消息（daemon 收到就处理，不进 inbox、不等 hook 轮询）。
+   *   - 范围：本进程在等回复的 + inbox 里同会话的（卡片点击、daemon 重启前收到的）；
    *   - inbox 文件（未认领 / 已认领）移到 expired/，留 <id>.stopped；等待立即结束，不发"超时"提示；
    *   - 写墓碑：worker 之后才写出的回复、正在分段发送的回复都不再发出；
    *   - 写 stop/<会话>.json {chatId, at, messageId, cancelled}；回用户一句。
@@ -399,8 +425,12 @@ export function createBridge(d: BridgeDeps) {
   async function handleStop(frame: Frame, msgid: string, chatKey: string): Promise<void> {
     const at = new Date().toISOString();
     const cancelled: string[] = [];
-    for (const [mid, ck] of [...waitChats]) {
-      if (ck !== chatKey || mid === msgid || outbox.hasTombstone(mid)) continue;
+    // 本进程在等的 + inbox 里同会话的（卡片点击没有等待方；daemon 重启前收到的也没有）
+    const targets = new Set<string>();
+    for (const [mid, ck] of waitChats) if (ck === chatKey) targets.add(mid);
+    for (const mid of await inboxIdsOf(chatKey)) targets.add(mid);
+    for (const mid of targets) {
+      if (mid === msgid || outbox.hasTombstone(mid)) continue;
       await backend.stop(mid, at, paths.expired).catch((e) => log("daemon.stop_error", { msgid: mid, error: errText(e) }));
       await outbox.tombstone(mid).catch((e) => log("daemon.tombstone_error", { msgid: mid, error: errText(e) }));
       cancelled.push(mid);
@@ -448,7 +478,7 @@ export function createBridge(d: BridgeDeps) {
           pumping = true;
           void (async () => {
             const now = Date.now();
-            if (stream.open && now - stream.startedAt >= streamWindowMs) {
+            if (stream.open && stream.startedAt > 0 && now - stream.startedAt >= streamWindowMs) {
               const head = previewed ? stream.lastText : "还在处理中";
               await stream.push(`${head}\n\n（处理时间较长，完成后另发完整回复）`, true);
               log("daemon.stream_window_closed", { msgid });
@@ -494,28 +524,33 @@ export function createBridge(d: BridgeDeps) {
 
   /**
    * 配对：白名单为空时，第一个私聊发出正确配对码的人成为主人。
-   * 写回 config.json（以磁盘上的为准，只改 allowedUserIds / pairCode），内存里的白名单同步生效，配对码作废。
+   * 配对码在第一个 await 之前就从内存里拿掉：同时到的第二条发码消息不会再通过 pairingPending。
+   * 写回 config.json：以磁盘上的为准，把发码人并进已有的 allowedUserIds、删掉 pairCode；写失败就把配对码放回去。
    */
   async function claimOwner(frame: Frame, userid: string): Promise<void> {
+    const code = config.pairCode;
+    delete config.pairCode;
+    const fail = async (text: string, e: unknown) => {
+      log("daemon.pair_error", { error: errText(e) });
+      if (config.pairCode === undefined && !(config.allowedUserIds || []).length) config.pairCode = code;
+      await replyStreamText(frame, text).catch(() => undefined);
+    };
     let disk: Record<string, unknown> = {};
     try {
       disk = existsSync(paths.config) ? (JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>) : {};
     } catch (e) {
-      log("daemon.pair_error", { error: errText(e) });
-      await replyStreamText(frame, "配对失败：config.json 读不出来，修好后重启 daemon 再发一次配对码。").catch(() => undefined);
-      return;
+      return fail("配对失败：config.json 读不出来，修好后重启 daemon 再发一次配对码。", e);
     }
+    const ids = cleanUserIds(disk.allowedUserIds);
+    if (!ids.includes(userid)) ids.push(userid);
     delete disk.pairCode;
-    disk.allowedUserIds = [userid];
+    disk.allowedUserIds = ids;
     try {
       await atomicWriteJson(paths.config, disk);
     } catch (e) {
-      log("daemon.pair_error", { error: errText(e) });
-      await replyStreamText(frame, "配对失败：config.json 写不进去，检查权限后再发一次配对码。").catch(() => undefined);
-      return;
+      return fail("配对失败：config.json 写不进去，检查权限后再发一次配对码。", e);
     }
-    delete config.pairCode;
-    config.allowedUserIds = [userid];
+    config.allowedUserIds = ids;
     isAllowed = makeIsAllowed(config);
     log("daemon.paired", { userid });
     await replyStreamText(frame, `配对成功，你（${userid}）现在是这个机器人的主人，直接发消息就行。`).catch(() => undefined);
@@ -747,7 +782,7 @@ export function createBridge(d: BridgeDeps) {
     }
     const evMsgid = String(body.msgid || "");
     const done = (id: string) =>
-      existsSync(join(paths.inbox, `${id}.json`)) || ["sent", "failed", "expired"].includes(outbox.locate(id));
+      existsSync(join(paths.inbox, `${id}.json`)) || outbox.hasTombstone(id) || ["sent", "failed", "expired"].includes(outbox.locate(id));
     const messageId = cardEventMessageId(dedupeKey, evMsgid, done);
     const item: InboxItem = {
       messageId,

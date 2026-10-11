@@ -1,5 +1,19 @@
 # 更新日志
 
+## 0.3.1
+
+- 修复：等回复超时后，消息不会再被 hook 重新认领执行（以前 25 分钟后会再唤醒一个 worker 跑同一条，长任务可能同时跑两遍）。超时时 inbox 文件移到 `expired/` 并留 `<id>.timeout`，还在跑的 worker 看到 `.claimed` 不见了就停；hook 跳过有墓碑的消息；认领有效期改为按 `replyTimeoutMin` + 5 分钟计算
+- 修复：`/clear` 之后才交上来的旧对话压缩结果会冲掉新对话。现在 `/clear`（包括 worker 提交的换话题请求）归档后 seq 不归零并记下起点，起点之前的压缩结果直接丢弃
+- 修复：`/stop` 停不了卡片点击触发的任务和 daemon 重启前收到的任务，现在会一并扫 inbox 里同会话的消息
+- 修复：正式回复恰好在"收到，正在处理"首推等回执时到达，那条流式消息会一直卡在"生成中"
+- 修复：超时的消息在之后 24 小时的上下文里一直显示"还在处理中"，现在记成"超时"一轮
+- 修复：两人同时发配对码都提示"配对成功"、后者覆盖前者；现在只有第一个成功，并且并进 config.json 里已有的白名单而不是覆盖
+- 修复：daemon.lock 改为先写临时文件再 link，杜绝"空锁被当成陈旧锁"导致两个 daemon 同时在线
+- 修复：`--install-cron` 把 node 绝对路径和 PATH 写进 cron 条目（nvm、/usr/local/bin 的 node 在 cron 里也能找到）；找不到 node 时安装直接报错；doctor 会提示旧版条目需重装
+- 修复：`allowedUserIds` 还是示例占位「你的企业微信userid」、或 userid 前后带空格时，check-config / doctor 一致报错（以前能启动但谁都用不了）
+- Node 版本要求统一为 20.10+（README / SKILL / doctor / package.json engines）
+- 升级：git pull && npm ci && npm run build，重启 daemon；把 hooks/wecom-inbox-watch.sh 重新复制到 ~/hooks/scripts/；装过 cron 的重新运行 `bash keepalive.sh --install-cron`
+
 ## 0.3.0
 
 - 新增 `npm run onboard`：终端出二维码，手机企业微信扫码「一键创建智能机器人」，Bot ID / Secret 自动写进 `secrets.env`（用的是企业微信官方 CLI 的扫码接口，未写进文档；只能新建机器人）

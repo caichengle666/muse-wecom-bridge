@@ -111,7 +111,9 @@ muse-wecom-bridge/
    可接受（最坏多发一条，不丢）。
 3. **inbox 原子认领**：hook 轮询脚本用 `mv` 把 `inbox/<id>.json` 原子改名为
    `<id>.json.claimed`，同一时刻只有一个轮询能抢到；worker 读 `.claimed`、处理完删除。
-   认领超 25 分钟（> 回复超时 20 分钟）视为 worker 崩溃，重新认领。
+   认领超过回复超时 + 5 分钟（hook 读 config.json 的 replyTimeoutMin）视为 worker 崩溃，重新认领。
+   daemon 等回复超时会把 inbox 文件移到 `expired/`（留 `<id>.timeout`），hook 认领/回收时也跳过有墓碑的 id，
+   所以超时、/stop 过的消息不会被重新唤醒执行。
 4. **心跳**：daemon 认证成功后每 30 秒写 `heartbeat.json`（`connected:true`），断线立即写 `connected:false`
    并停止刷新；`keepalive.sh` 要求 pid 文件指向的进程是本 ROOT 的 daemon，且心跳 pid 相符、已连接、90 秒内新鲜
    （或刚断线/刚启动不足 90 秒）才算健康，否则杀掉重拉（防假死）。
@@ -149,8 +151,8 @@ muse-wecom-bridge/
    - token 每次启动随机生成，`heartbeat.json` 也写它（启动即写一次 `connected:false`）。
    - keepalive 认定"是我们的 daemon"= pid 存在 ∧ starttime 相同 ∧ 心跳 pid、token 与 pid 文件相同 ∧ 命令行脚本 realpath = `$ROOT/dist/daemon.js`。
      只有这时才会 kill；身份不符（pid 复用等）只记日志、不杀，直接拉新实例（新实例若撞上真正存活的旧实例，会被 daemon.lock 拒绝）。
-2. **单实例锁**（`src/lock.ts`）：`open(daemon.lock, "wx")`。已存在时：持有者存活（pid + starttime）→ 拒绝启动；否则视为陈旧，
-   `rename` 到唯一的 `daemon.lock.stale.<rand>` 后核对 inode 与判定时 stat 的相同（不同说明拿走的是别人刚建的新锁，用不覆盖的 `link()` 放回），再重试 O_EXCL。
+2. **单实例锁**（`src/lock.ts`）：身份先写进唯一临时文件，再 `link()` 成 `daemon.lock`（原子、不覆盖，锁一出现就有完整内容，不会被当成空的陈旧锁）。已存在时：持有者存活（pid + starttime）→ 拒绝启动；否则视为陈旧，
+   `rename` 到唯一的 `daemon.lock.stale.<rand>` 后核对 inode 与判定时 stat 的相同（不同说明拿走的是别人刚建的新锁，用不覆盖的 `link()` 放回），再重试。
    残余风险：三个实例在毫秒级同时回收同一陈旧锁、且放回时原处又被第三方占用，理论上可能出现两个持锁者；cron 5 分钟一次的 keepalive 下可忽略。
    TS 侧判断锁持有者存活只用 pid + starttime（锁本身就是 token 的权威来源，不再读心跳）。
 3. **投递状态机**（`src/outbox.ts`）：`outbox/` →（认领 rename）→ `inflight/` → `sent/` | `failed/` | `expired/`；临时失败 `inflight/ → outbox/`。

@@ -5,10 +5,11 @@
 # worker 读 .claimed，处理完删除；worker 崩溃时，超过认领有效期会重新认领。
 #
 # 上下文（只由本脚本写，worker 从不直接改历史文件，避免两边同时写互相覆盖）：
-#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts}], next_seq, updated}
+#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts}], next_seq, seq_floor, updated}
 #   ~/hooks/state/<NAME>-pending.json       已认领、还没收割的消息 {messageId: {chatId, text, ts, at, skip}}
 # worker 只会留下两种"请求文件"，由本脚本下一轮合并：
-#   <NAME>-ctx-<key>.summary.json  {summary, upto_seq}  把 seq ≤ upto_seq 的旧轮压缩进 summary
+#   <NAME>-ctx-<key>.summary.json  {summary, upto_seq}  把 seq ≤ upto_seq 的旧轮压缩进 summary（upto_seq < seq_floor 的是
+#                                  /clear 之前旧对话的，丢弃；/clear 归档后 seq 不归零，新历史从 seq_floor 开始）
 #   <NAME>-ctx-<key>.clear.json    {messageId}           用户要换话题：归档历史、这条不入新历史
 # 流程：
 #   - 认领时：从 .claimed 读出 chatId 和用户原文记入 pending；/clear 在这一步直接归档
@@ -18,6 +19,8 @@
 #     较早的轮压成摘要（保留最近 2 轮原文），照常写 summary 请求文件由本脚本合并；还在处理中的任务不受影响
 #   - /stop 由 daemon 秒级处理（不进 inbox）：被中断的消息移到 expired/ 并留 expired/<id>.stopped，
 #     收割时记成"被中断"的一轮；之后第一条新消息带 after_stop，提醒 worker 按新指令做、别接着做旧任务
+#   - 等回复超时：daemon 写墓碑 expired/<id>.tombstone、把 inbox 文件移到 expired/ 并留 <id>.timeout；
+#     收割时记成"超时"的一轮；认领/回收时有墓碑的 id 一律不再唤醒
 #   - 唤醒时：按 messageId 把 {summary, turns, compress_needed, ctx_key} 写进上下文文件，payload 的 context_file 指向它
 # 限制：只按大小（UTF-8 字节），不按轮数。超过 MAX_BYTES 时让 worker 压缩；worker 没压缩、涨到 2×MAX_BYTES
 #   时脚本兜底从最旧的开始丢。单条超长截断到 8000 字。
@@ -29,7 +32,10 @@ NAME="wecom"                                    # 状态文件前缀
 BRIDGE_ROOT="$HOME/workspace/muse-wecom-bridge"  # 桥接部署目录：装在别处就改这一行
 INBOX="$BRIDGE_ROOT/inbox"
 CTX_DIR="$HOME/hooks/state"
-STALE_SECS=1500        # 认领有效期：必须大于回复超时（config.json replyTimeoutMin=20 分钟）
+# 认领有效期：必须大于 daemon 的回复超时（config.json replyTimeoutMin，默认 20 分钟），这里取超时 + 5 分钟。
+# 超时时 daemon 已把 inbox 文件移到 expired/，所以过期回收只会碰到 daemon 没在等的消息（如 daemon 重启过）
+STALE_SECS="$(jq -r '((.replyTimeoutMin // 20) | if type == "number" and . > 0 then . else 20 end) * 60 + 300 | floor' "$BRIDGE_ROOT/config.json" 2>/dev/null || echo 1500)"
+case "$STALE_SECS" in ''|*[!0-9]*) STALE_SECS=1500 ;; esac
 MAX_BYTES="${CTX_MAX_BYTES:-524288}"  # 每个会话的上下文上限：512KB（UTF-8 字节，含摘要），超了让 worker 压缩
                                       # Muse Spark 1.3 窗口 1,048,576 token；512KB 中文约 17 万字
 CTX_TTL_DAYS=7         # 多少天没动过的历史删掉
@@ -131,13 +137,23 @@ def blen(s):
 def size(ctx):  # UTF-8 字节
     return blen(ctx["summary"]) + sum(blen(t.get("user")) + blen(t.get("assistant")) for t in ctx["turns"])
 
-def do_clear(pending, chat, mid):
-    """归档该会话历史；这条以及同会话更早的未完成消息都不进新历史。"""
-    key = key_of(chat)
+def reset_ctx(key, chat=None):
+    """归档该会话历史，换成只带 next_seq 的新历史：seq 接着往上数，seq_floor 记下新历史从哪开始，
+    /clear 之前就在写的压缩请求（upto_seq < seq_floor）合并时会被丢掉，不会冲掉新对话"""
     p = ctx_path(key)
+    old = load_ctx(key)
     if os.path.exists(p):
         os.replace(p, ctx_path(key, "-archived-%d" % int(time.time())))
     rm(ctx_path(key, ".summary"))
+    fresh = {"chatId": chat or old.get("chatId") or "", "next_seq": old["next_seq"], "seq_floor": old["next_seq"],
+             "updated": int(time.time())}
+    if old.get("stop_seen"):
+        fresh["stop_seen"] = old["stop_seen"]
+    save_atomic(p, fresh)
+
+def do_clear(pending, chat, mid):
+    """归档该会话历史；这条以及同会话更早的未完成消息都不进新历史。"""
+    reset_ctx(key_of(chat), chat)
     at = pending.get(mid, {}).get("at", "")
     for k, v in pending.items():
         if v.get("chatId") == chat and (k == mid or (at and v.get("at", "") <= at)):
@@ -160,6 +176,17 @@ def user_text(d):
         text = (text + " " if text else "") + "[附件: %s]" % ", ".join(notes)
     return text[:ITEM_MAX]
 
+def add_turn(info, assistant, now):
+    """没有正式回复的一轮（被 /stop 中断、超时）"""
+    chat = info.get("chatId") or "unknown"
+    key = key_of(chat)
+    ctx = load_ctx(key)
+    ctx["chatId"] = chat
+    ctx["turns"].append({"seq": ctx["next_seq"], "user": info.get("text", ""), "assistant": assistant, "ts": int(now)})
+    ctx["next_seq"] += 1
+    ctx["updated"] = int(now)
+    save_atomic(ctx_path(key), ctx)
+
 pending = load(PENDING)
 
 if mode == "harvest":
@@ -176,7 +203,7 @@ if mode == "harvest":
         if chat and key_of(chat) == key:
             do_clear(pending, chat, mid)
         elif os.path.exists(ctx_path(key)):
-            os.replace(ctx_path(key), ctx_path(key, "-archived-%d" % int(time.time())))
+            reset_ctx(key)
         rm(p)
         changed = True
     # 2) worker 留下的压缩结果
@@ -193,6 +220,8 @@ if mode == "harvest":
         if not isinstance(summary, str) or not isinstance(upto, int):
             continue
         ctx = load_ctx(key)
+        if upto < int(ctx.get("seq_floor") or 0):   # /clear 之前的旧对话的压缩结果：作废
+            continue
         ctx["turns"] = [t for t in ctx["turns"] if t["seq"] > upto]
         ctx["summary"] = summary.strip()[:SUMMARY_MAX]
         ctx["updated"] = int(time.time())
@@ -206,18 +235,16 @@ if mode == "harvest":
             del pending[mid]; changed = True
             if info.get("skip") or info.get("compact") is not None:
                 continue
-            chat = info.get("chatId") or "unknown"
-            key = key_of(chat)
-            ctx = load_ctx(key)
-            ctx["chatId"] = chat
-            ctx["turns"].append({"seq": ctx["next_seq"], "user": info.get("text", ""),
-                                 "assistant": "（用户发 /stop 中断了这条，回复没有发出；中断前可能已执行了一部分）",
-                                 "ts": int(now)})
-            ctx["next_seq"] += 1
-            ctx["updated"] = int(now)
-            save_atomic(ctx_path(key), ctx)
+            add_turn(info, "（用户发 /stop 中断了这条，回复没有发出；中断前可能已执行了一部分）", now)
             continue
         if not os.path.exists(sent_f):
+            if os.path.exists(os.path.join(bridge, "expired", mid + ".tombstone")):
+                # daemon 等回复超时，已经让用户重发：记成一轮，后面的 worker 不会以为它还在处理
+                del pending[mid]; changed = True
+                if info.get("skip") or info.get("compact") is not None:
+                    continue
+                add_turn(info, "（处理超时，回复没有发出，已提示用户重发；超时前可能已执行了一部分）", now)
+                continue
             gone = any(os.path.exists(os.path.join(bridge, d, mid + ".json")) for d in ("failed", "expired"))
             if gone or now - info.get("ts", now) > PENDING_TTL:
                 del pending[mid]; changed = True
@@ -324,9 +351,16 @@ fi
 claimed=( )
 if [ -d "$INBOX" ]; then
   shopt -s nullglob
+  # 已作废（daemon 写了墓碑：超时 / /stop）的消息不再唤醒，文件移到 expired/（daemon 正常会自己移，这里兜底）
+  retired() {
+    [ -e "$BRIDGE_ROOT/expired/$1.tombstone" ] || return 1
+    mkdir -p "$BRIDGE_ROOT/expired"
+    mv -n "$2" "$BRIDGE_ROOT/expired/$1.inbox.json" 2>/dev/null || rm -f "$2"
+  }
   # 1a. *.json 不会匹配 *.json.claimed；daemon 原子写入，不会有半截文件
   for f in "$INBOX"/*.json; do
     id="$(basename "$f" .json)"
+    retired "$id" "$f" && continue
     if mv "$f" "$INBOX/$id.json.claimed" 2>/dev/null; then
       claimed+=("$id")
     fi
@@ -337,6 +371,7 @@ if [ -d "$INBOX" ]; then
     mtime="$(stat -c %Y "$f" 2>/dev/null || echo "$now")"
     if [ $((now - mtime)) -gt "$STALE_SECS" ]; then
       id="$(basename "$f" .json.claimed)"
+      retired "$id" "$f" && continue
       already=0
       for c in "${claimed[@]}"; do [ "$c" = "$id" ] && already=1 && break; done
       if [ "$already" -eq 0 ] && touch "$f" 2>/dev/null; then

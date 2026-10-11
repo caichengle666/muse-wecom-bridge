@@ -50,7 +50,7 @@ Muse 会照着 SKILL.md 自己走完：创建企业微信智能机器人、拿 B
 # 1. 克隆
 git clone <你的仓库地址> muse-wecom-bridge && cd muse-wecom-bridge
 
-# 2. 安装依赖（需要 Node.js 20+；测试用到 node --test）
+# 2. 安装依赖（需要 Node.js 20.10+；测试用到 node --test --test-concurrency）
 npm ci
 
 # 3. 配凭证和白名单（扫码建的跳过这步，onboard 已写好 secrets.env 和 config.json）
@@ -82,10 +82,10 @@ npm test
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `allowedUserIds` | （必填） | 允许对话的 userid 列表；为空则拒绝启动，除非 `allowAll: true` 或有待配对的 `pairCode` |
+| `allowedUserIds` | （必填） | 允许对话的 userid 列表；为空、还是示例占位、userid 前后带空格都拒绝启动（为空时除非 `allowAll: true` 或有待配对的 `pairCode`） |
 | `pairCode` | — | `npm run onboard` 生成的一次性配对码；白名单为空时第一个私聊发出它的人进白名单，随后自动删除 |
 | `allowAll` | `false` | 显式对所有人开放（仅当列表为空时生效，不推荐） |
-| `replyTimeoutMin` | `20` | 等助手回复的分钟数，超时后写墓碑、迟到回复不再补发 |
+| `replyTimeoutMin` | `20` | 等助手回复的分钟数，超时后写墓碑、迟到回复不再补发，这条消息也不会再被 hook 重新认领执行 |
 | `wsUrl` | `wss://openws.work.weixin.qq.com` | 长连接网关 |
 | `allowedFileRoots` | `[<ROOT>/outgoing, os.tmpdir(), /tmp]` | outbox `file`/`images` 允许的目录（支持 `~/`）；realpath 后比对 |
 | `logMessageText` | `false` | 为 `true` 时 debug.log 记录消息原文（截断 300 字） |
@@ -95,7 +95,7 @@ npm test
 
 ### 常驻运行（保活）
 
-同一 BotID 只允许**一条**长连接。daemon 启动时自己用 O_EXCL 创建 `daemon.lock`（同 ROOT 已有存活 daemon 则拒绝启动，
+同一 BotID 只允许**一条**长连接。daemon 启动时自己原子创建 `daemon.lock`（同 ROOT 已有存活 daemon 则拒绝启动，
 已死进程留下的陈旧锁会被安全回收），并写 `daemon.pid`。两者内容都是一行 `<pid> <starttime> <token>`：starttime 是
 `/proc/<pid>/stat` 第 22 字段（防 pid 复用），token 是每次启动随机生成的令牌。`heartbeat.json` 为
 `{pid, ts, connected, token}`：启动即写一次 `connected:false`，认证成功后每 30 秒写 `connected:true`，断线时立即写一次 `connected:false` 并停止刷新。
@@ -115,7 +115,7 @@ keepalive 自身用 flock 防并发（拿不到锁会在 daemon.log 记一行）
 bash keepalive.sh            # 检查并在需要时拉起
 bash keepalive.sh --status   # 只检查，健康 exit 0 / 不健康 exit 1
 
-bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行）
+bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行；条目里写死 node 绝对路径，换 node 版本后重装）
 bash keepalive.sh --uninstall-cron
 ```
 
@@ -163,7 +163,7 @@ bash keepalive.sh --uninstall-cron
   - 永久错误（本地校验失败，或 errcode 40008/42044/42045/40058）→ 其余部件照发，整条移到 `failed/<id>.json`，
     原因写在 `failed/<id>.reason.json`；文件/卡片失败会给用户发一条"xx发送失败：原因"；
   - 临时错误（限频、断线、回执超时…）→ 留在 outbox，排空时重试，最多 5 次后进 `failed/`；
-  - 等回复超时 → 写墓碑 `expired/<id>.tombstone`，之后迟到的 outbox 文件直接移到 `expired/`，不再补发。
+  - 等回复超时 → 写墓碑 `expired/<id>.tombstone`，inbox 文件移到 `expired/`（留 `<id>.timeout`），之后迟到的 outbox 文件直接移到 `expired/`，不再补发。
 - **卡片点击**：演示按钮（`demo_confirm`/`demo_cancel`）daemon 原地处理；其它按钮 daemon 先把卡片更新为
   **同 card_type** 的"✅ 已收到"（基于原卡片快照，保留类型必填字段），再往 inbox 写一条
   `{"type":"card_event","eventKey","taskId","text":"[卡片点击] <key>", ...}`，messageId 形如 `card-<事件msgid>`。
@@ -258,7 +258,7 @@ muse-wecom-bridge/
 │   ├── files.ts             # 外发文件安全校验、媒体类型识别
 │   ├── state.ts             # 去重水位、心跳、卡片登记表、卡片回调去重、pid 文件
 │   ├── proc.ts              # 进程身份：/proc/<pid>/stat starttime、启动令牌
-│   ├── lock.ts              # daemon 单实例锁 daemon.lock（O_EXCL + 陈旧锁回收）
+│   ├── lock.ts              # daemon 单实例锁 daemon.lock（原子创建 + 陈旧锁回收）
 │   ├── config.ts / paths.ts / chunk.ts / logger.ts / fsutil.ts
 │   ├── test/                # node --test 离线测试（假客户端，不连网）
 │   ├── wecom-morning-brief.py # DPMC 早报生成（主动推送示例）

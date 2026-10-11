@@ -1,8 +1,8 @@
 /**
  * lock.ts — daemon 单实例锁（0.2.1）。
  *
- * daemon 自己用 O_EXCL（open "wx"）创建 daemon.lock，内容为 `<pid> <starttime> <token>`，
- * 不再依赖 keepalive 的"先检查再拉起"（check-then-start 有竞态，手动 npm start 也绕得过）。
+ * daemon 自己创建 daemon.lock，内容为 `<pid> <starttime> <token>`：先写进唯一临时文件再 link() 过去
+ * （link 不覆盖已有文件，锁文件从出现那一刻起就有完整内容）。不再依赖 keepalive 的"先检查再拉起"（check-then-start 有竞态，手动 npm start 也绕得过）。
  *
  * 已存在的锁：
  *   - 持有者仍活着（pid 存在且 starttime 相同）→ 获取失败；
@@ -29,16 +29,22 @@ export function acquireInstanceLock(path: string, self: Identity, opts: LockOpti
   const maxTries = opts.maxTries ?? 5;
   let reclaimed = false;
   for (let i = 0; i < maxTries; i++) {
+    // 先把身份写进唯一的临时文件，再 link 成 daemon.lock：锁一出现就带着完整内容，
+    // 别人不会读到"刚创建还是空的"锁而当成陈旧锁回收
+    const tmp = `${path}.new.${randomBytes(4).toString("hex")}`;
     try {
-      const fd = openSync(path, "wx", 0o600);
+      const fd = openSync(tmp, "wx", 0o600);
       try {
         writeSync(fd, formatIdentity(self));
       } finally {
         closeSync(fd);
       }
+      linkSync(tmp, path);
       return { ok: true, reclaimed };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    } finally {
+      rmSync(tmp, { force: true });
     }
     // 锁已存在：看持有者
     let raw: string, ino: number;

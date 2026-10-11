@@ -97,13 +97,21 @@ export class MuseBackend {
   }
 
   /**
-   * /stop：把这条的 inbox 文件（未认领 <id>.json 或已认领 <id>.json.claimed）原子移到
-   * <expiredDir>/<id>.inbox.json，写 <expiredDir>/<id>.stopped（hook 据此记"被中断"一轮），
-   * 并让正在进行的 waitReply 立即结束。返回原状态；两个文件都不在返回 null。
+   * /stop：让正在进行的 waitReply 立即结束，并把 inbox 文件移走、留 <expiredDir>/<id>.stopped（见 retire）。
    */
   async stop(messageId: string, at: string, expiredDir: string): Promise<"unclaimed" | "claimed" | null> {
     this.stopped.add(messageId);
     if (this.stopped.size > 5000) this.stopped.delete(this.stopped.values().next().value as string);
+    return this.retire(messageId, at, expiredDir, "stopped");
+  }
+
+  /**
+   * 作废一条消息：把 inbox 文件（未认领 <id>.json 或已认领 <id>.json.claimed）原子移到
+   * <expiredDir>/<id>.inbox.json，再写标记 <expiredDir>/<id>.<marker>（stopped = 被 /stop 中断，
+   * timeout = 等回复超时）。hook 据标记记一轮；还在跑的 worker 发现 .claimed 不见了就停下。
+   * 返回原状态；两个文件都不在返回 null。
+   */
+  async retire(messageId: string, at: string, expiredDir: string, marker: "stopped" | "timeout"): Promise<"unclaimed" | "claimed" | null> {
     await mkdir(expiredDir, { recursive: true });
     const src = join(this.dirs.inbox, `${messageId}.json`);
     let state: "unclaimed" | "claimed" | null = null;
@@ -116,9 +124,9 @@ export class MuseBackend {
         /* 不在 / 刚被认领，试下一个 */
       }
     }
-    const tmp = join(expiredDir, `${messageId}.stopped.tmp`);
+    const tmp = join(expiredDir, `${messageId}.${marker}.tmp`);
     await writeFile(tmp, JSON.stringify({ at, state }), "utf8");
-    await rename(tmp, join(expiredDir, `${messageId}.stopped`));
+    await rename(tmp, join(expiredDir, `${messageId}.${marker}`));
     return state;
   }
 

@@ -19,7 +19,7 @@ import { platform } from "node:os";
 import { join } from "node:path";
 import QRCode from "qrcode";
 import { makePaths, resolveRoot } from "./paths.js";
-import { isPlaceholder, newPairCode, parseEnvFile } from "./config.js";
+import { cleanUserIds, isPlaceholder, newPairCode, parseEnvFile } from "./config.js";
 import { atomicWriteJson } from "./fsutil.js";
 
 const BASE = "https://work.weixin.qq.com/ai/qc";
@@ -92,18 +92,13 @@ export function mergeSecrets(existing: string, botId: string, secret: string): s
  */
 export function mergeConfig(cfg: Record<string, unknown>, code: string = newPairCode()): { config: Record<string, unknown>; pairCode?: string } {
   const out = { ...cfg };
-  const list = Array.isArray(out.allowedUserIds)
-    ? (out.allowedUserIds as unknown[]).filter((x): x is string => typeof x === "string" && !!x.trim() && x !== EXAMPLE_USERID)
-    : [];
+  const list = cleanUserIds(out.allowedUserIds);
   out.allowedUserIds = list;
   delete out.pairCode;
   if (list.length || out.allowAll === true) return { config: out };
   out.pairCode = code;
   return { config: out, pairCode: code };
 }
-
-/** config.example.json 里的占位 userid */
-const EXAMPLE_USERID = "你的企业微信userid";
 
 const mask = (s: string) => (s.length <= 8 ? "***" : `${s.slice(0, 6)}…${s.slice(-3)}`);
 

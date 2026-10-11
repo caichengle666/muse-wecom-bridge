@@ -10,7 +10,7 @@
 
 ## 运行要求
 
-- Node.js 18+
+- Node.js 20.10+（`npm test` 用到 `node --test --test-concurrency`）
 - 一个企业微信**智能机器人**（API 模式 + 长连接）：`npm run onboard` 扫码自动建，或手动建后拿 BotID 和 Secret
 - 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）
 
@@ -71,7 +71,8 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接没装在 `~/workspace/muse-wecom-bridge` 的话改脚本里的 `BRIDGE_ROOT`（hook 定义 prompt 里的路径也一起改）
 - `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑；`poll_interval_secs` 用 5（hook 允许的最小值）
 - 轮询脚本原子认领（`<id>.json` → `<id>.json.claimed`）后 `wake`；worker 读 claimed → 写 outbox（先 `.tmp` 再 mv）→ 删 claimed
-- claimed 25 分钟没被消费会被重新认领
+- claimed 超过回复超时（`replyTimeoutMin`，默认 20 分钟）+ 5 分钟没被消费会被重新认领；daemon 已超时或 /stop 过（有墓碑 `expired/<id>.tombstone`）的消息不会再被认领
+- 等回复超时：daemon 提示用户重发，同时把 inbox 文件移到 `expired/` 并留 `<id>.timeout`、写墓碑（迟到的回复不发）；还在跑的 worker 发现 `.claimed` 不见了就停；脚本收割时记成"超时"一轮
 
 ### 多轮上下文（hook 自带，无需改桥接代码）
 
@@ -81,7 +82,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - 唤醒时按 messageId 写进上下文文件 `~/hooks/state/wecom-wake-*.json`：`{messageId: {ctx_key, summary, turns, compress_needed}}`，payload 只带 `context_file` 路径（上下文可能很大，不塞进 wake 参数）；同一会话里还没回完的前几条也会带上；文件一天后自动删
 - 只按大小限制（512KB，UTF-8 字节，含摘要），不按轮数。超限时给最新那条标 `compress_needed`，worker 回复完后把最旧的几轮压缩成摘要，写 `wecom-ctx-<ctx_key>.summary.json`：`{summary, upto_seq}`，脚本下一轮合并（删掉 seq ≤ upto_seq 的轮）
 - worker 一直没压缩、涨到 2 倍上限时，脚本兜底从最旧的开始丢
-- `/stop`（`@机器人 /stop` 也行）：daemon 直接处理，中断本会话所有没回完的消息——inbox 文件移到 `expired/` 并留 `<id>.stopped`、等待立即结束、写墓碑（迟到的回复不发）、写 `stop/<会话>.json`；worker 每步动手前检查自己的 `.claimed` 是否还在，不在就停；脚本收割时把被中断的那条记成"被中断"一轮，之后第一条新消息的上下文带 `after_stop: true`
+- `/stop`（`@机器人 /stop` 也行）：daemon 直接处理，中断本会话所有没回完的消息（包括卡片点击触发的、daemon 重启前收到的）——inbox 文件移到 `expired/` 并留 `<id>.stopped`、等待立即结束、写墓碑（迟到的回复不发）、写 `stop/<会话>.json`；worker 每步动手前检查自己的 `.claimed` 是否还在，不在就停；脚本收割时把被中断的那条记成"被中断"一轮，之后第一条新消息的上下文带 `after_stop: true`
 - `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `wecom-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
 - `/compact [重点]`（群里 `@机器人 /compact` 也行）：手动压缩，这条本身不进历史；上下文带 `compact: true`、`compact_hint`、`size_bytes`，并强制 `compress_needed: true`，worker 把 summary 和除最近 2 轮外的带 seq 的轮压成摘要，照常写 `wecom-ctx-<ctx_key>.summary.json`；还在处理中的任务（没 seq 的）不动，回复后照常入历史
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
@@ -100,7 +101,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 ## 保活与自检
 
 - daemon：心跳 30 秒、连续 2 次没收到 pong 判断线并无限重连；被顶号自动退出，由保活拉起
-- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起；`--uninstall-cron` 移除
+- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起（条目里写死当前 node 的绝对路径，换了 node 版本重新装一次）；`--uninstall-cron` 移除
 - hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
 - `npm run doctor`：只读自检，有 FAIL 退出码 1；"白名单等待配对"是 WARN，配对完就消失
 

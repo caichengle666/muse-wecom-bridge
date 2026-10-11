@@ -1,7 +1,7 @@
 #!/bin/bash
 # muse-wecom daemon 保活：健康则静默退出；不健康（进程不在 / 心跳停滞 / 断线超过宽限）则（杀掉并）拉起。
 # 同一个机器人只允许一条长连接：keepalive 用 flock（缺失时退回 mkdir 锁）防止并发拉起，
-# daemon 自己再用 O_EXCL 的 daemon.lock 保证单实例（0.2.1）。
+# daemon 自己再用原子创建的 daemon.lock 保证单实例（0.2.1）。
 #
 # 用法：
 #   bash keepalive.sh            # 检查并在需要时拉起
@@ -187,13 +187,19 @@ if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
   if [ "$1" = "--uninstall-cron" ]; then
     printf '%s\n' "$CUR" | sed '/^$/d' | crontab - && echo "已移除 cron 条目"; exit $?
   fi
-  KA="/bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
+  # cron 的 PATH 只有 /usr/bin:/bin：把 node 的绝对路径和它所在目录写进条目（nvm、/usr/local/bin 也能找到）
+  [ -n "$NODE_BIN" ] || { echo "找不到 node：先让 node 在 PATH 里，或 NODE_BIN=/node/的/绝对路径 bash keepalive.sh --install-cron"; exit 2; }
+  case "$NODE_BIN" in /*) NODE_ABS="$NODE_BIN" ;; *) NODE_ABS="$(realpath -- "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")" ;; esac
+  [ -x "$NODE_ABS" ] || { echo "node 不可执行：$NODE_ABS"; exit 2; }
+  CRON_PATH="$(dirname "$NODE_ABS")"
+  for d in /usr/local/bin /usr/bin /bin; do case ":$CRON_PATH:" in *":$d:"*) ;; *) CRON_PATH="$CRON_PATH:$d" ;; esac; done
+  KA="NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
   {
     printf '%s\n' "$CUR" | sed '/^$/d'
     echo "*/5 * * * * $KA $MARK"
     echo "@reboot sleep 30 && $KA $MARK"
   } | crontab - || exit 1
-  echo "已安装 cron：每 5 分钟检查一次 + 开机 30 秒后拉起"
+  echo "已安装 cron：每 5 分钟检查一次 + 开机 30 秒后拉起（node：$NODE_ABS；换了 node 版本要重新安装）"
   crontab -l | grep -F "$MARK"
   pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1 || echo "警告：cron 服务似乎没在运行（service cron start）"
   exit 0

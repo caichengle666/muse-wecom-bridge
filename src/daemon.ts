@@ -86,7 +86,7 @@ async function main(): Promise<void> {
   }
 
   // 同一 ROOT 只允许一个 daemon（同一 BotID 只许一条长连接，两个实例会互相顶号）。
-  // 0.2.1：daemon 自己用 O_EXCL 创建 daemon.lock（pid + starttime + token），陈旧锁安全回收；
+  // 0.2.1：daemon 自己原子创建 daemon.lock（pid + starttime + token），陈旧锁安全回收；
   // 不再依赖 keepalive 的"先检查再拉起"。
   await mkdir(paths.root, { recursive: true });
   await mkdir(paths.stream, { recursive: true });

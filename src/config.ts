@@ -77,10 +77,16 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   const errors: string[] = [];
   const warnings: string[] = [];
   const ids = cfg.allowedUserIds;
-  if (ids !== undefined && (!Array.isArray(ids) || ids.some((x) => typeof x !== "string" || !x.trim()))) {
-    errors.push("allowedUserIds 必须是非空字符串数组");
+  if (ids !== undefined) {
+    if (!Array.isArray(ids) || ids.some((x) => typeof x !== "string" || !x.trim())) {
+      errors.push("allowedUserIds 必须是非空字符串数组");
+    } else {
+      if (ids.includes(EXAMPLE_USERID)) errors.push(`allowedUserIds 里还是示例占位「${EXAMPLE_USERID}」：换成真实 userid，或删掉它后运行 npm run onboard 配对`);
+      const spaced = ids.filter((x) => x !== x.trim());
+      if (spaced.length) errors.push(`allowedUserIds 里的 userid 前后有空格：${spaced.map((x) => JSON.stringify(x)).join("、")}`);
+    }
   }
-  const list = Array.isArray(ids) ? ids.filter((x) => typeof x === "string" && x.trim()) : [];
+  const list = cleanUserIds(ids);
   if (cfg.allowAll !== undefined && typeof cfg.allowAll !== "boolean") {
     errors.push("allowAll 必须是 true/false");
   }
@@ -119,15 +125,28 @@ export function newPairCode(): string {
   return Array.from(bytes, (b) => PAIR_ALPHABET[b % PAIR_ALPHABET.length]).join("");
 }
 
+/** config.example.json 里的占位 userid */
+export const EXAMPLE_USERID = "你的企业微信userid";
+
+/** 白名单里真正可用的 userid：字符串、去掉首尾空白后非空、不是示例占位；去重 */
+export function cleanUserIds(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    const t = typeof x === "string" ? x.trim() : "";
+    if (t && t !== EXAMPLE_USERID && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
 /** 配对是否在等待中：白名单为空、未 allowAll、配对码有效。 */
 export function pairingPending(cfg: BridgeConfig): boolean {
-  const list = (cfg.allowedUserIds || []).filter((x) => typeof x === "string" && x.trim());
-  return !list.length && cfg.allowAll !== true && isValidPairCode(cfg.pairCode);
+  return !cleanUserIds(cfg.allowedUserIds).length && cfg.allowAll !== true && isValidPairCode(cfg.pairCode);
 }
 
 /** 白名单判定：列表非空 → 只认列表；列表为空 → 仅当 allowAll === true 放行。 */
 export function makeIsAllowed(cfg: BridgeConfig): (userid: string) => boolean {
-  const list = new Set((cfg.allowedUserIds || []).filter((x) => typeof x === "string" && x.trim()));
+  const list = new Set(cleanUserIds(cfg.allowedUserIds));
   if (list.size > 0) return (u) => list.has(u);
   if (cfg.allowAll === true) return () => true;
   return () => false;

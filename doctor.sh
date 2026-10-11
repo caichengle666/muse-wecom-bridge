@@ -16,8 +16,12 @@ HOOK_ID="wecom-inbox-watch"
 
 # ---- 运行环境 ----
 if command -v node >/dev/null 2>&1; then
-  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "${major:-0}" -ge 18 ] 2>/dev/null; then ok "Node.js $(node -v)"; else fail "Node.js 版本过低（$(node -v)），需要 18+"; fi
+  # npm test 用到 node --test --test-concurrency（20.10 起才有）
+  if node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>20||(a===20&&b>=10)?0:1)' 2>/dev/null; then
+    ok "Node.js $(node -v)"
+  else
+    fail "Node.js 版本过低（$(node -v)），需要 20.10+"
+  fi
 else
   fail "找不到 node"
 fi
@@ -44,11 +48,14 @@ else
 fi
 if [ -f config.json ]; then
   if jq -e . config.json >/dev/null 2>&1; then
-    n="$(jq '[.allowedUserIds // [] | .[] | select(type == "string" and length > 0 and (test("^(your|test|xxx|placeholder|change)"; "i") | not))] | length' config.json)"
-    if [ "${n:-0}" -gt 0 ]; then ok "白名单 $n 人"
+    # 与 check-config 同一规则：示例占位、空白、前后带空格的 userid 都算错
+    bad="$(jq '[.allowedUserIds // [] | .[] | select(type != "string" or test("^\\s*$") or test("^\\s|\\s$") or . == "你的企业微信userid")] | length' config.json 2>/dev/null || echo 1)"
+    n="$(jq '[.allowedUserIds // [] | .[] | select(type == "string" and (test("^\\s*$") or test("^\\s|\\s$") or . == "你的企业微信userid" | not))] | unique | length' config.json 2>/dev/null || echo 0)"
+    if [ "${bad:-0}" -gt 0 ]; then fail "config.json 的 allowedUserIds 里有 $bad 个无效 userid（示例占位「你的企业微信userid」或前后有空格）：daemon 会拒绝启动，npm run check-config 看详情"
+    elif [ "${n:-0}" -gt 0 ]; then ok "白名单 $n 人"
     elif [ "$(jq -r '.allowAll // false' config.json)" = "true" ]; then warn "allowAll=true：所有人都能用这个机器人"
     elif jq -e '.pairCode | type == "string" and test("^[A-HJ-NP-Z2-9]{8}$")' config.json >/dev/null 2>&1; then warn "白名单等待配对：在企业微信里私聊机器人发送 config.json 里的 pairCode"
-    else fail "config.json 的 allowedUserIds 为空或还是占位符（daemon 会拒绝启动）"; fi
+    else fail "config.json 的 allowedUserIds 为空（daemon 会拒绝启动）"; fi
     [ "$(jq -r '.streamReplies // true' config.json)" = "false" ] && warn "streamReplies=false：流式打字机已关闭"
   else
     fail "config.json 不是合法 JSON"
@@ -70,6 +77,8 @@ else
   fi
 fi
 if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -qF "muse-wecom-bridge keepalive ($ROOT)"; then
+  crontab -l 2>/dev/null | grep -F "muse-wecom-bridge keepalive ($ROOT)" | grep -q "NODE_BIN=" ||
+    warn "cron 条目没写 node 路径（cron 的 PATH 里可能找不到 node）：重新运行 bash keepalive.sh --install-cron"
   if pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then ok "cron 保活已安装且 cron 在运行"; else warn "cron 条目在但 cron 服务没运行（hook 会兜底拉起，但最好 service cron start）"; fi
 else
   warn "没装 cron 保活（bash keepalive.sh --install-cron）；hook 每 5 秒会兜底拉起"
