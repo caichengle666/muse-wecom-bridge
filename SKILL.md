@@ -12,37 +12,26 @@
 
 - Node.js 18+
 - 企业微信管理后台建**智能机器人**（工作台 → 智能机器人 → API 模式 → 长连接），拿到 BotID 和 Secret
-- 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动）
+- 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）
 
 ## 部署
 
 ```bash
 git clone https://github.com/caichengle666/muse-wecom-bridge && cd muse-wecom-bridge
 npm install
-cp secrets.env.example secrets.env   # 填入 WECOM_BOT_ID / WECOM_BOT_SECRET，chmod 600
-cp config.example.json config.json   # 填 allowedUserIds（企业微信 userid）
 npm run build && npm test
+npm run onboard   # 终端出二维码，让用户用手机企业微信扫码「一键创建智能机器人」；自动写 secrets.env，并在 config.json 生成 8 位配对码
+# 扫码不可用时手动：cp secrets.env.example secrets.env 填 WECOM_BOT_ID/SECRET（chmod 600）；cp config.example.json config.json 填 allowedUserIds
 bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
 # 注册 hook（见下文「消息处理 hook」）后：
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
 
-部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机企业微信**给机器人发一条消息，收到回复才算真的通了。
+部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机企业微信**私聊机器人：扫码建的先发 onboard 打印的配对码（回"配对成功"即进白名单），再随便发一条，收到回复才算真的通了。
 
-## 不会申请机器人？让 Muse 代办
+## 扫码失败时
 
-没操作过企业微信管理后台不用自己研究——直接在 **Muse App 里开启浏览器操作模式**，跟 Muse 说：
-
-> "帮我在企业微信创建一个 Muse 智能机器人"
-
-Muse 会在浏览器里帮你走完：
-
-1. 进入企业微信管理后台，创建智能机器人并切换到 API 模式 + 长连接
-2. 取出 BotID 和 Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
-
-你只需要在登录、扫码验证这类环节接管一下浏览器。
-
-白名单要填你自己的企业微信 userid（一般在管理后台通讯录里能看到，不知道的话让 Muse 帮你找），填进 `config.json` 的 `allowedUserIds` 后重启。
+`npm run onboard` 用的是企业微信官方 CLI 的扫码接口（未写进文档），失效时让用户在手机企业微信 **工作台 → 智能机器人 → 创建机器人 → 手动创建 → API 模式 → 长连接** 建好，把 Bot ID / Secret 告诉你写进 `secrets.env`；白名单填用户的企业微信 userid（管理后台通讯录「账号」栏）。
 
 ## 消息处理 hook（部署时必建）
 

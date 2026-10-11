@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { MuseBackend, InboxItem } from "./muse-backend.js";
 import type { BridgeConfig } from "./config.js";
-import { makeIsAllowed } from "./config.js";
+import { makeIsAllowed, pairingPending } from "./config.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./logger.js";
 import { CardEventDedupe, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
@@ -189,7 +189,7 @@ export function createBridge(d: BridgeDeps) {
       c.loadSync();
       return c;
     })();
-  const isAllowed = makeIsAllowed(config);
+  let isAllowed = makeIsAllowed(config);
   const exit = d.exit ?? ((code: number) => process.exit(code));
   const kickExitDelayMs = d.kickExitDelayMs ?? 1500;
   const ackDelayMs = d.ackDelayMs ?? 8000;
@@ -492,6 +492,35 @@ export function createBridge(d: BridgeDeps) {
     return true;
   }
 
+  /**
+   * 配对：白名单为空时，第一个私聊发出正确配对码的人成为主人。
+   * 写回 config.json（以磁盘上的为准，只改 allowedUserIds / pairCode），内存里的白名单同步生效，配对码作废。
+   */
+  async function claimOwner(frame: Frame, userid: string): Promise<void> {
+    let disk: Record<string, unknown> = {};
+    try {
+      disk = existsSync(paths.config) ? (JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>) : {};
+    } catch (e) {
+      log("daemon.pair_error", { error: errText(e) });
+      await replyStreamText(frame, "配对失败：config.json 读不出来，修好后重启 daemon 再发一次配对码。").catch(() => undefined);
+      return;
+    }
+    delete disk.pairCode;
+    disk.allowedUserIds = [userid];
+    try {
+      await atomicWriteJson(paths.config, disk);
+    } catch (e) {
+      log("daemon.pair_error", { error: errText(e) });
+      await replyStreamText(frame, "配对失败：config.json 写不进去，检查权限后再发一次配对码。").catch(() => undefined);
+      return;
+    }
+    delete config.pairCode;
+    config.allowedUserIds = [userid];
+    isAllowed = makeIsAllowed(config);
+    log("daemon.paired", { userid });
+    await replyStreamText(frame, `配对成功，你（${userid}）现在是这个机器人的主人，直接发消息就行。`).catch(() => undefined);
+  }
+
   async function handleText(frame: Frame, textOverride?: string, isVoice?: boolean): Promise<DeliverOutcome | null> {
     const body = frame.body || {};
     const msgid = String(body.msgid || "");
@@ -503,6 +532,15 @@ export function createBridge(d: BridgeDeps) {
     log("daemon.msg", { msgid, sender, chatType, len: text.length, ...(logText ? { text: text.slice(0, 300) } : {}) });
 
     if (!isAllowed(sender)) {
+      if (pairingPending(config)) {
+        if (chatType === "single" && text.toUpperCase() === config.pairCode) {
+          await claimOwner(frame, sender);
+          return null;
+        }
+        log("daemon.blocked_pairing_pending", { msgid, sender });
+        await replyStreamText(frame, "这个机器人还没绑定主人：私聊发送 npm run onboard 时终端显示的 8 位配对码。").catch(() => undefined);
+        return null;
+      }
       log("daemon.blocked_not_allowed", { msgid, sender });
       await replyStreamText(frame, "抱歉，这个机器人只服务它的主人。").catch(() => undefined);
       return null;

@@ -47,6 +47,7 @@ if [ -f config.json ]; then
     n="$(jq '[.allowedUserIds // [] | .[] | select(type == "string" and length > 0 and (test("^(your|test|xxx|placeholder|change)"; "i") | not))] | length' config.json)"
     if [ "${n:-0}" -gt 0 ]; then ok "白名单 $n 人"
     elif [ "$(jq -r '.allowAll // false' config.json)" = "true" ]; then warn "allowAll=true：所有人都能用这个机器人"
+    elif jq -e '.pairCode | type == "string" and test("^[A-HJ-NP-Z2-9]{8}$")' config.json >/dev/null 2>&1; then warn "白名单等待配对：在企业微信里私聊机器人发送 config.json 里的 pairCode"
     else fail "config.json 的 allowedUserIds 为空或还是占位符（daemon 会拒绝启动）"; fi
     [ "$(jq -r '.streamReplies // true' config.json)" = "false" ] && warn "streamReplies=false：流式打字机已关闭"
   else

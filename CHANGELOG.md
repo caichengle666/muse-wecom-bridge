@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.3.0
+
+- 新增 `npm run onboard`：终端出二维码，手机企业微信扫码「一键创建智能机器人」，Bot ID / Secret 自动写进 `secrets.env`（用的是企业微信官方 CLI 的扫码接口，未写进文档；只能新建机器人）
+- 配对码：扫码拿不到扫码人 userid，白名单为空时 onboard 生成 8 位 `pairCode`；daemon 启动后私聊机器人发这个码，发码人自动写进 `allowedUserIds`、配对码作废；配对前其他人只收到"还没绑定主人"
+- `check-config` / `doctor` 识别"等待配对"状态
+- 文档：README / SKILL 用扫码替代"让 Muse 用浏览器代建机器人"的流程，手动创建作为兜底
+- 升级：git pull && npm ci && npm run build，重启 daemon
+
 ## 0.2.0
 
 - 流式打字机：worker 边写边往 `stream/<id>.jsonl` 追加，daemon 推成企业微信流式消息（"处理中"那条直接长出内容，正式回复定格在同一条上）；每 3 秒最多刷新一次，9 分钟窗口收尾后正式回复另发；`/stop`、超时、出错都会收尾；`streamReplies: false` 关闭

@@ -1,10 +1,12 @@
 {
   "dependencies": {
-    "@wecom/aibot-node-sdk": "^1.0.7"
+    "@wecom/aibot-node-sdk": "^1.0.7",
+    "qrcode": "^1.5.4"
   },
   "description": "WeCom (企业微信) 智能机器人长连接桥接 for the Muse platform (file-queue backend)",
   "devDependencies": {
     "@types/node": "^26.6.4",
+    "@types/qrcode": "^1.5.6",
     "typescript": "^5.6.0"
   },
   "name": "muse-wecom-bridge",
@@ -13,8 +15,9 @@
     "check-config": "node dist/daemon.js --check-config",
     "start": "node dist/daemon.js",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
-    "doctor": "bash doctor.sh"
+    "doctor": "bash doctor.sh",
+    "onboard": "node dist/onboard.js"
   },
   "type": "module",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

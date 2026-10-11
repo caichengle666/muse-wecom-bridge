@@ -43,3 +43,4 @@ config.json
 .DS_Store
 Thumbs.db
 __pycache__/
+onboard-qr.png

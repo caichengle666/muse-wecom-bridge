@@ -1,6 +1,7 @@
 /** config.ts — config.json / secrets.env 的加载与校验（白名单 fail-closed）。 */
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 
 export interface BridgeConfig {
   wsUrl?: string;
@@ -11,6 +12,11 @@ export interface BridgeConfig {
   allowedUserIds?: string[];
   /** 显式放开给所有人（仅当 allowedUserIds 为空时生效；不推荐）。 */
   allowAll?: boolean;
+  /**
+   * 一次性配对码（npm run onboard 生成）。白名单为空时，第一个在私聊里发出这个码的人
+   * 被写进 allowedUserIds，然后配对码作废。扫码接口不返回扫码人 userid，所以靠它补上主人。
+   */
+  pairCode?: string;
   /** 等待助手回复的分钟数，默认 20。 */
   replyTimeoutMin?: number;
   /**
@@ -78,7 +84,10 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   if (cfg.allowAll !== undefined && typeof cfg.allowAll !== "boolean") {
     errors.push("allowAll 必须是 true/false");
   }
-  if (!list.length && cfg.allowAll !== true) {
+  const pairing = isValidPairCode(cfg.pairCode);
+  if (cfg.pairCode !== undefined && !pairing) errors.push("pairCode 必须是 8 位大写字母/数字（重新运行 npm run onboard 生成）");
+  if (pairing && list.length) warnings.push("allowedUserIds 已有人，pairCode 不再生效，可以删掉");
+  if (!list.length && cfg.allowAll !== true && !pairing) {
     errors.push(
       '白名单为空：请在 config.json 的 allowedUserIds 填入允许使用的企业微信 userid；' +
         '确实要对所有人开放，需显式设置 "allowAll": true',
@@ -96,6 +105,24 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
     }
   }
   return { errors, warnings };
+}
+
+const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+export function isValidPairCode(v: unknown): v is string {
+  return typeof v === "string" && /^[A-HJ-NP-Z2-9]{8}$/.test(v);
+}
+
+/** 8 位配对码（去掉易混的 0/O/1/I），约 40 bit。 */
+export function newPairCode(): string {
+  const bytes = randomBytes(8);
+  return Array.from(bytes, (b) => PAIR_ALPHABET[b % PAIR_ALPHABET.length]).join("");
+}
+
+/** 配对是否在等待中：白名单为空、未 allowAll、配对码有效。 */
+export function pairingPending(cfg: BridgeConfig): boolean {
+  const list = (cfg.allowedUserIds || []).filter((x) => typeof x === "string" && x.trim());
+  return !list.length && cfg.allowAll !== true && isValidPairCode(cfg.pairCode);
 }
 
 /** 白名单判定：列表非空 → 只认列表；列表为空 → 仅当 allowAll === true 放行。 */

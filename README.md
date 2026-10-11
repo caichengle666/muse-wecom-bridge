@@ -30,12 +30,18 @@ Muse 会照着 SKILL.md 自己走完：创建企业微信智能机器人、拿 B
 
 ## 准备工作
 
-1. 企业微信管理后台 → **工作台 → 智能机器人**（注意不是「自建应用」，两者名字可以一样，聊错对象是第一大坑）
-2. 新建机器人 → 选 **API 模式** → **长连接**
+**最省事：扫码建机器人（0.3.0）**。装好依赖后运行 `npm run build && npm run onboard`，终端会打出二维码（同时存一张 `onboard-qr.png`），用手机企业微信扫码、点「一键创建智能机器人」即可：
+
+- Bot ID / Secret 自动写进 `secrets.env`（600，不在终端显示）；
+- 扫码接口拿不到扫码人的 userid，所以白名单为空时会生成一个 8 位**配对码**写进 `config.json`。daemon 启动后，在企业微信里**私聊**机器人发送这个配对码，你就自动进了白名单，配对码随即作废；配对前别人发消息只会收到"还没绑定主人"的提示；
+- 只能新建机器人。这个扫码接口是企业微信官方 CLI（`@wecom/wecom-openclaw-cli`）在用的，没写进开发者文档，哪天失效就按下面手动建。
+
+手动建：
+
+1. 企业微信 → **工作台 → 智能机器人**（注意不是「自建应用」，两者名字可以一样，聊错对象是第一大坑）
+2. 创建机器人 → 手动创建 → **API 模式** → 连接方式选 **长连接**
 3. 可见范围按需设置（仅自己用就选仅自己）
 4. 从机器人详情页拿到 **BotID** 和 **Secret**
-
-> **没操作过企业微信管理后台？** 直接在 **Muse App 里开启浏览器操作模式**，跟 Muse 说"帮我在企业微信创建一个 Muse 智能机器人"，Muse 会帮你走完上面 1–4 步：建机器人、切 API 模式 + 长连接、取出 BotID 和 Secret 写好 `secrets.env`。你只需要在登录、扫码验证时接管一下浏览器。
 
 
 ## 部署步骤
@@ -47,7 +53,7 @@ git clone <你的仓库地址> muse-wecom-bridge && cd muse-wecom-bridge
 # 2. 安装依赖（需要 Node.js 20+；测试用到 node --test）
 npm ci
 
-# 3. 配凭证（不要提交到 git！）
+# 3. 配凭证和白名单（扫码建的跳过这步，onboard 已写好 secrets.env 和 config.json）
 cp secrets.env.example secrets.env
 # 编辑 secrets.env，填入 WECOM_BOT_ID 和 WECOM_BOT_SECRET
 chmod 600 secrets.env
@@ -76,7 +82,8 @@ npm test
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `allowedUserIds` | （必填） | 允许对话的 userid 列表；为空则拒绝启动，除非 `allowAll: true` |
+| `allowedUserIds` | （必填） | 允许对话的 userid 列表；为空则拒绝启动，除非 `allowAll: true` 或有待配对的 `pairCode` |
+| `pairCode` | — | `npm run onboard` 生成的一次性配对码；白名单为空时第一个私聊发出它的人进白名单，随后自动删除 |
 | `allowAll` | `false` | 显式对所有人开放（仅当列表为空时生效，不推荐） |
 | `replyTimeoutMin` | `20` | 等助手回复的分钟数，超时后写墓碑、迟到回复不再补发 |
 | `wsUrl` | `wss://openws.work.weixin.qq.com` | 长连接网关 |
@@ -245,6 +252,7 @@ worker 写长回复时边写边往 `stream/<id>.jsonl` 追加，每次一整行 
 muse-wecom-bridge/
 ├── src/
 │   ├── daemon.ts            # 进程胶水：配置校验、pid 文件、创建 WSClient 注入 bridge
+│   ├── onboard.ts           # npm run onboard：扫码建机器人，写 secrets.env 和配对码
 │   ├── bridge.ts            # 业务逻辑：消息路由、白名单、被动回复、卡片回调、被顶号、定时任务
 │   ├── outbox.ts            # 投递引擎：按部件记进度、失败/过期分流、排空互斥
 │   ├── muse-backend.ts      # inbox 入队 / 等 outbox 回复

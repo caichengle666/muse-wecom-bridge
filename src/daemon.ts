@@ -13,7 +13,7 @@ import tls from "node:tls";
 import { WSClient } from "@wecom/aibot-node-sdk";
 import { MuseBackend } from "./muse-backend.js";
 import { makePaths, resolveRoot } from "./paths.js";
-import { isPlaceholder, loadConfig, loadSecrets, validateConfig, type BridgeConfig } from "./config.js";
+import { isPlaceholder, loadConfig, loadSecrets, pairingPending, validateConfig, type BridgeConfig } from "./config.js";
 import { RotatingLogger } from "./logger.js";
 import { CardEventDedupe, CardRegistry, HeartbeatWriter, SeenStore, removePidFileSync, writePidFile } from "./state.js";
 import { selfIdentity } from "./proc.js";
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     console.log("配置检查通过: config.json 与 secrets.env 有效（未连接企业微信）。");
     console.log(`  ROOT=${paths.root}`);
     console.log(`  wsUrl=${wsUrl}`);
-    console.log(`  白名单: ${list.length ? list.join(",") : "allowAll=true（对所有人开放）"}`);
+    console.log(`  白名单: ${list.length ? list.join(",") : pairingPending(cfg) ? "等待配对（私聊机器人发送配对码）" : "allowAll=true（对所有人开放）"}`);
     console.log(`  允许外发文件目录: ${resolveAllowedRoots(paths.root, cfg.allowedFileRoots).join(", ")}`);
     const probe = await probeGateway(wsUrl);
     console.log(`  网关连通性: ${probe.ok ? "OK" : "FAIL"}（${probe.detail}）`);
