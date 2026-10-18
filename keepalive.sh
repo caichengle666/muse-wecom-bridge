@@ -11,13 +11,14 @@
 #   source keepalive.sh          # 只定义函数、不执行（测试用）
 #
 # 环境变量（都可选）：
-#   MUSE_WECOM_ROOT        运行目录，默认本脚本所在目录（一律 realpath 规范化）
+#   MUSE_WECOM_ROOT        运行（数据）目录，默认本脚本所在目录（一律 realpath 规范化）。可以是纯数据目录：
+#                          那里没有 dist/daemon.js 时，用本脚本所在仓库的 dist/daemon.js 启动（代码与数据分开）
 #   MUSE_WECOM_GRACE_SEC   刚断线（connected:false）的宽限秒数，默认 90
 #   MUSE_WECOM_START_GRACE_SEC  新进程的宽限秒数（给认证机会），默认同 GRACE
 #   MUSE_WECOM_STALE_SEC   心跳多久不更新算停滞，默认 90
 #   MUSE_WECOM_WAIT_SEC    拉起后等待"已认证"心跳的秒数，默认 45
 #   MUSE_WECOM_FLOCK_BIN   flock 路径，默认 command -v flock；设为空串则视为没有 flock（走 mkdir 锁）
-#   NODE_BIN               node 路径，默认 command -v node
+#   NODE_BIN               node 路径，默认 command -v node；都找不到时读 $ROOT/.node-bin（--install-cron 或上次运行记下的）
 #
 # 进程身份（0.2.1）：daemon.pid 一行 `<pid> <starttime> <token>`，heartbeat.json 也带 token。
 # 只有 pid 存在 且 /proc/<pid>/stat 的 starttime 与记录相同 且 心跳 token 与 pid 文件相同
@@ -25,19 +26,27 @@
 # 才认为"是我们的 daemon"，也只有这时才会去 kill 它——pid 被复用时绝不误杀无关进程。
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_RAW="${MUSE_WECOM_ROOT:-$SCRIPT_DIR}"
 ROOT="$(realpath -m -- "$ROOT_RAW" 2>/dev/null || readlink -f -- "$ROOT_RAW" 2>/dev/null || echo "$ROOT_RAW")"
 LOG="$ROOT/daemon.log"
 PIDFILE="$ROOT/daemon.pid"
 HEARTBEAT="$ROOT/heartbeat.json"
-DAEMON_JS="$ROOT/dist/daemon.js"
+# daemon.js：ROOT 是完整仓库副本时用 ROOT 里的（以前的行为）；ROOT 是纯数据目录时用本脚本所在仓库的
+CODE_DAEMON_JS="$SCRIPT_DIR/dist/daemon.js"
+if [ -f "$ROOT/dist/daemon.js" ] || [ ! -f "$CODE_DAEMON_JS" ]; then DAEMON_JS="$ROOT/dist/daemon.js"; else DAEMON_JS="$CODE_DAEMON_JS"; fi
 DAEMON_JS_REAL="$(realpath -m -- "$DAEMON_JS" 2>/dev/null || echo "$DAEMON_JS")"
+ROOT_DAEMON_JS_REAL="$(realpath -m -- "$ROOT/dist/daemon.js" 2>/dev/null || echo "$ROOT/dist/daemon.js")"
+CODE_DAEMON_JS_REAL="$(realpath -m -- "$CODE_DAEMON_JS" 2>/dev/null || echo "$CODE_DAEMON_JS")"
 GRACE="${MUSE_WECOM_GRACE_SEC:-90}"
 START_GRACE="${MUSE_WECOM_START_GRACE_SEC:-$GRACE}"
 STALE="${MUSE_WECOM_STALE_SEC:-90}"
 WAIT_SEC="${MUSE_WECOM_WAIT_SEC:-45}"
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+if [ -z "$NODE_BIN" ] && [ -f "$ROOT/.node-bin" ]; then
+  NODE_BIN="$(head -1 "$ROOT/.node-bin" 2>/dev/null || true)"
+  [ -x "$NODE_BIN" ] || NODE_BIN=""
+fi
 FLOCK_BIN="${MUSE_WECOM_FLOCK_BIN-$(command -v flock || true)}"
 
 log() { echo "[$(date '+%F %T')] keepalive: $*" >> "$LOG"; }
@@ -87,7 +96,7 @@ daemon_script_of() {
   realpath -m -- "$script" 2>/dev/null
 }
 
-# pid 存在 + starttime 与记录相同 + 命令行脚本就是本 ROOT 的 dist/daemon.js
+# pid 存在 + starttime 与记录相同 + 命令行脚本就是本 ROOT 的 dist/daemon.js（ROOT 是纯数据目录时也认本仓库的）
 is_our_daemon() {
   local pid="$1" st="$2" cur script
   [ -n "$pid" ] && [ -n "$st" ] || return 1
@@ -95,7 +104,21 @@ is_our_daemon() {
   cur="$(proc_starttime "$pid")" || return 1
   [ "$cur" = "$st" ] || return 1
   script="$(daemon_script_of "$pid")" || return 1
-  [ "$script" = "$DAEMON_JS_REAL" ]
+  [ "$script" = "$DAEMON_JS_REAL" ] || [ "$script" = "$ROOT_DAEMON_JS_REAL" ] ||
+    { [ "$ROOT" != "$SCRIPT_DIR" ] && [ "$script" = "$CODE_DAEMON_JS_REAL" ]; }
+}
+
+# 记下 node 绝对路径和本脚本位置，给 hook 兜底拉起用（hook 的 PATH 里可能没有 nvm 的 node；数据目录里可能没有 keepalive.sh）
+remember_paths() {
+  local nb="$1" f
+  case "$nb" in /*) ;; *) nb="$(command -v -- "$nb" 2>/dev/null || true)" ;; esac
+  if [ -n "$nb" ] && [ -x "$nb" ] && [ "$(cat "$ROOT/.node-bin" 2>/dev/null)" != "$nb" ]; then
+    f="$ROOT/.node-bin.tmp.$$"; printf '%s\n' "$nb" > "$f" 2>/dev/null && mv -f -- "$f" "$ROOT/.node-bin" 2>/dev/null || rm -f -- "$f"
+  fi
+  if [ "$ROOT" != "$SCRIPT_DIR" ] && [ "$(cat "$ROOT/.keepalive-path" 2>/dev/null)" != "$SCRIPT_DIR/keepalive.sh" ]; then
+    f="$ROOT/.keepalive-path.tmp.$$"; printf '%s\n' "$SCRIPT_DIR/keepalive.sh" > "$f" 2>/dev/null && mv -f -- "$f" "$ROOT/.keepalive-path" 2>/dev/null || rm -f -- "$f"
+  fi
+  return 0
 }
 
 # 输出 "<pid> <ts秒> <connected 0/1> <token|->"；读不到输出 "0 0 0 -"
@@ -193,7 +216,12 @@ if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
   [ -x "$NODE_ABS" ] || { echo "node 不可执行：$NODE_ABS"; exit 2; }
   CRON_PATH="$(dirname "$NODE_ABS")"
   for d in /usr/local/bin /usr/bin /bin; do case ":$CRON_PATH:" in *":$d:"*) ;; *) CRON_PATH="$CRON_PATH:$d" ;; esac; done
-  KA="NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
+  # 脚本用本仓库的（ROOT 可能是纯数据目录，里面没有 keepalive.sh）；ROOT 不是脚本目录时带上 MUSE_WECOM_ROOT
+  KA_ENV=""
+  [ "$ROOT" = "$SCRIPT_DIR" ] || KA_ENV="MUSE_WECOM_ROOT=$(printf '%q' "$ROOT") "
+  KA="${KA_ENV}NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$SCRIPT_DIR/keepalive.sh") >/dev/null 2>&1"
+  mkdir -p "$ROOT" 2>/dev/null || true
+  remember_paths "$NODE_ABS"
   {
     printf '%s\n' "$CUR" | sed '/^$/d'
     echo "*/5 * * * * $KA $MARK"
@@ -213,6 +241,7 @@ fi
 mkdir -p "$ROOT" 2>/dev/null || true
 
 acquire_ka_lock || exit 0
+[ -n "$NODE_BIN" ] && remember_paths "$NODE_BIN"
 
 if is_healthy; then
   exit 0
