@@ -79,8 +79,8 @@ muse-wecom-bridge/
 3. `npm start`：看到"已认证，长连接就绪"。
 4. 在企业微信里给机器人发一句话 → daemon 写 inbox → hook 唤醒助手 → 助手回 outbox →
    daemon 流式回企业微信。
-5. 建 hook（复用 `feishu-inbox-watch`，改目录为 `~/workspace/muse-wecom/inbox`）并启用，
-   再启用 systemd 单元常驻。
+5. 建 hook（`hooks/wecom-inbox-watch.{sh,json}`，见 SKILL.md；桥接目录 `~/workspace/muse-wecom-bridge`，装在别处 hook 会自动定位）并启用，
+   再用 `bash keepalive.sh --install-cron` 常驻（hook 也会兜底拉起）。
 
 ## 已知约束
 
