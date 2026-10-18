@@ -4,8 +4,11 @@
 # 退出码：有 FAIL 为 1，否则 0。
 # 最终验收标准：关掉 Muse 网页，只用手机企业微信给机器人发消息，能收到回复才算部署完成。
 set -u
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT" || exit 2
+CODE="$(cd "$(dirname "$0")" && pwd)"   # 代码目录（本脚本所在的仓库副本）
+# 运行（数据）目录：与 daemon / keepalive 一致，MUSE_WECOM_ROOT 优先，默认就是代码目录
+ROOT_RAW="${MUSE_WECOM_ROOT:-$CODE}"
+ROOT="$(realpath -m -- "$ROOT_RAW" 2>/dev/null || echo "$ROOT_RAW")"
+cd "$ROOT" || { echo "[FAIL] 进不去运行目录 $ROOT"; exit 2; }
 FAILS=0 WARNS=0
 ok()   { echo "[OK]   $*"; }
 warn() { echo "[WARN] $*"; WARNS=$((WARNS + 1)); }
@@ -25,9 +28,9 @@ if command -v node >/dev/null 2>&1; then
 else
   fail "找不到 node"
 fi
-[ -d node_modules/@wecom/aibot-node-sdk ] && ok "依赖已安装" || fail "依赖没装：npm ci"
-if [ -f dist/daemon.js ]; then
-  newest_src="$(find src -name '*.ts' -newer dist/daemon.js 2>/dev/null | head -1)"
+[ -d "$CODE/node_modules/@wecom/aibot-node-sdk" ] && ok "依赖已安装" || fail "依赖没装：npm ci"
+if [ -f "$CODE/dist/daemon.js" ]; then
+  newest_src="$(find "$CODE/src" -name '*.ts' -newer "$CODE/dist/daemon.js" 2>/dev/null | head -1)"
   if [ -n "$newest_src" ]; then warn "源码比编译产物新（如 $newest_src）：更新后要 npm run build 并重启 daemon"; else ok "已编译（dist/daemon.js）"; fi
 else
   fail "没编译：npm run build"
@@ -69,7 +72,7 @@ else
 fi
 
 # ---- daemon ----
-if bash keepalive.sh --status >/dev/null 2>&1; then
+if MUSE_WECOM_ROOT="$ROOT" bash "$CODE/keepalive.sh" --status >/dev/null 2>&1; then
   ok "daemon 健康（身份核实 + 长连接已连接）"
 else
   if [ -f heartbeat.json ]; then
@@ -92,15 +95,24 @@ fi
 HOOK_SH="$HOME/hooks/scripts/$HOOK_ID.sh"
 HOOK_DEF="$HOME/hooks/definitions/$HOOK_ID.json"
 if [ -f "$HOOK_SH" ]; then
-  hook_root="$(sed -n 's/^BRIDGE_ROOT="\(.*\)".*/\1/p' "$HOOK_SH" | head -1)"
-  hook_root="${hook_root//\$HOME/$HOME}"
-  if [ -n "$hook_root" ] && [ "$(cd "$hook_root" 2>/dev/null && pwd)" != "$ROOT" ]; then
-    fail "hook 脚本的 BRIDGE_ROOT（$hook_root）不是本目录（$ROOT）：消息会没人处理，改脚本里那一行"
+  hook_note=""
+  if grep -q '^resolve_bridge_root()' "$HOOK_SH"; then
+    # 新版 hook 自动定位桥接目录：用 hook 自己的函数算一遍（只定义函数，不跑轮询）
+    hook_err="$(mktemp 2>/dev/null || echo /tmp/.wecom-doctor.$$)"
+    hook_root="$(bash -c 'eval "$(sed -n "/^DEFAULT_BRIDGE_ROOT=/,/^BRIDGE_ROOT=/p" "$1" | sed "\$d")"; resolve_bridge_root' _ "$HOOK_SH" 2>"$hook_err")"
+    hook_note="$(cat "$hook_err" 2>/dev/null)"; rm -f "$hook_err"
   else
-    ok "hook 脚本存在：$HOOK_SH"
+    hook_root="$(sed -n 's/^BRIDGE_ROOT="\(.*\)".*/\1/p' "$HOOK_SH" | head -1)"
+    hook_root="${hook_root//\$HOME/$HOME}"
   fi
-  if ! cmp -s "$HOOK_SH" hooks/$HOOK_ID.sh; then
-    warn "hook 脚本和仓库里的不一致（更新后没复制？）：cp hooks/$HOOK_ID.sh $HOOK_SH（装在别处的话记得改 BRIDGE_ROOT）"
+  [ -n "$hook_note" ] && warn "${hook_note#wecom-inbox-watch: }"
+  if [ -n "$hook_root" ] && [ "$(realpath -m -- "$hook_root" 2>/dev/null || echo "$hook_root")" != "$ROOT" ]; then
+    fail "hook 定位到的桥接目录（$hook_root）不是本目录（$ROOT）：消息会没人处理（装了多份时设 MUSE_WECOM_ROOT 或改 hook 脚本里的 DEFAULT_BRIDGE_ROOT）"
+  else
+    ok "hook 脚本存在：$HOOK_SH（桥接目录 $ROOT）"
+  fi
+  if ! cmp -s "$HOOK_SH" "$CODE/hooks/$HOOK_ID.sh"; then
+    warn "hook 脚本和仓库里的不一致（更新后没复制？）：cp $CODE/hooks/$HOOK_ID.sh $HOOK_SH"
   fi
 else
   fail "hook 脚本不存在：$HOOK_SH（cp hooks/$HOOK_ID.sh 过去）"
@@ -108,6 +120,8 @@ fi
 if [ -f "$HOOK_DEF" ]; then
   if [ "$(jq -r '.enabled // false' "$HOOK_DEF" 2>/dev/null)" = "true" ]; then
     ok "hook $HOOK_ID 已注册并启用"
+    jq -r '.prompt // ""' "$HOOK_DEF" 2>/dev/null | grep -q '<bridge_root>' ||
+      warn "hook 定义是旧版（prompt 里路径写死 ~/workspace/muse-wecom-bridge）：用 $CODE/hooks/$HOOK_ID.json 重新注册（保留自己的 delivery.to）"
   else
     fail "hook $HOOK_ID 注册了但没启用：消息只会躺在 inbox 里没人唤醒，让 Muse 启用它"
   fi
