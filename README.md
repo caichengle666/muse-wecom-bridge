@@ -76,6 +76,8 @@ npm start
 # 看到 "已认证，长连接就绪" 即成功
 
 # 8. 跑测试（离线，不连企业微信；需要 Linux /proc 与 python3）
+# 注意：daemon 运行时依赖 Linux /proc（进程身份核验），keepalive.sh / doctor.sh 依赖 GNU coreutils
+# （stat -c、realpath -m）和 setsid，只支持 Linux；macOS / Windows 不支持（onboard 里的平台判断只用于打开二维码）
 npm test
 ```
 
@@ -94,6 +96,10 @@ npm test
 | `logMessageText` | `false` | 为 `true` 时 debug.log 记录消息原文（截断 300 字） |
 | `streamReplies` | `true` | 流式打字机，见"流式输出" |
 
+**手改 `config.json` 后要重启 daemon 才生效**（daemon 只在启动时读配置）。尤其是**撤销权限**：从 `allowedUserIds` 删人、
+从 `allowedChatIds` 删群后，重启前 daemon 仍会放行他们；重启方法：`kill $(cut -d' ' -f1 daemon.pid)` 后 `bash keepalive.sh`
+（或等 cron / hook 自动拉起）。只有配对码配对、群里发 `/授权本群` `/取消授权本群` 是 daemon 自己改的，立即生效、不用重启。
+
 ### 授权群
 
 默认只有 `allowedUserIds` 里的人（主人）能用。要让某个群里的所有人都能 @机器人 使用，主人在那个群里发：
@@ -107,10 +113,17 @@ npm test
 - daemon 直接处理（原子改写 `config.json`、立即生效，不用重启），不交给 Muse；
 - 没授权的群 @机器人 时，`debug.log` 里 `daemon.blocked_not_allowed` 带着该群的 `chatId`，想手动加可以从这里找；
 - 授权群里的文字、语音、图片、文件、卡片点击、`/stop` `/clear` `/compact` 都和主人一样可用；群里是一份共用的上下文，hook 会记下每轮是谁说的；
-- 群成员和主人共用同一个 Muse：hook 提示词要求 worker 按 `senderUserId` 认主人（自称主人不算），群里不是主人的人要求时不改 `config.json`（加人、授权群只走上面的命令）、不读不发凭证、不删文件、不改配置；
+- 群成员和主人共用同一个 Muse。0.3.5 起分两层限制：
+  - **daemon 硬约束**：入队时 daemon 自己判定说话人是不是主人，写进 inbox 的 `senderIsOwner`（worker 不用、也不该自己读 config 判断）；并在 `routes.json` 记下每条消息来自哪个会话。排空主动推送时校验 outbox 的 `chatId`：非主人发起的消息只能回到原会话；主人发起的还可以发到主人私聊或授权群；没有来源记录的（`proactive-*`）只能发主人私聊或授权群。不符的整条进 `failed/`（`daemon.drain_route_rejected`）；
+  - **提示词白名单**（hook 定义 prompt 的 2a3）：`senderIsOwner=false` 时 worker 只做对话问答、读本条附件和本会话上下文、写本条回复（只发文字/卡片），不执行命令、不读写本机其他文件（凭证、别人的附件、主人私聊的上下文）、不改配置、不给其他会话发消息、不把他的卡片点击当作主人的确认；
+  - **残余风险**：worker 本身是能跑 shell 的 Muse 助手，提示词约束挡不住所有提示词注入（引用原文、文件名、附件内容都会进 text）；daemon 只能管住"发到哪个会话"，管不住 worker 在本机做了什么、往原群里发了什么。授权群请只拉信得过的人，敏感操作只在私聊里做；
 - `npm run check-config` 和 `npm run doctor` 会显示授权群个数。
 
-环境变量 `MUSE_WECOM_ROOT` 可覆盖运行目录（默认是仓库目录，即 `dist/` 的上一级）；daemon、keepalive.sh、早报脚本都认它。
+环境变量 `MUSE_WECOM_ROOT` 可覆盖运行（数据）目录（默认是仓库目录，即 `dist/` 的上一级）；daemon、keepalive.sh、doctor.sh、hook、早报脚本、send-file.mjs 都认它。
+它可以是**纯数据目录**（只放 config.json、secrets.env、inbox/ 等）：keepalive 发现里面没有 `dist/daemon.js` 时用自己所在仓库的 `dist/daemon.js` 启动，
+`--install-cron` 写进去的是仓库里的 `keepalive.sh` 并带上 `MUSE_WECOM_ROOT`；doctor 用 `MUSE_WECOM_ROOT=<数据目录> bash <仓库>/doctor.sh` 检查。
+keepalive 每次运行会在数据目录记下 `.node-bin`（node 绝对路径）和 `.keepalive-path`（数据目录与代码目录分开时），hook 兜底拉起时用。
+hook 跑在 Muse 侧、不一定继承这个环境变量：装在非默认目录时 hook 会自动在 `$HOME` 下找（见 SKILL.md），装了多份才需要给 hook 也设 `MUSE_WECOM_ROOT`。
 
 ### 常驻运行（保活）
 
@@ -121,7 +134,7 @@ npm test
 
 `keepalive.sh` 以**脚本所在目录**为 ROOT（可用 `MUSE_WECOM_ROOT` 覆盖，一律 realpath 规范化）。认定"是我们的 daemon"需要同时满足：
 pid 存在、当前 starttime 与 pid 文件相同、心跳的 pid 与 token 与 pid 文件相同、命令行里的 `daemon.js`（相对路径按进程 cwd 解析）
-realpath 后就是 `$ROOT/dist/daemon.js`。**只有身份完全核实才会 kill**；pid 被复用的无关进程绝不会被误杀。判定健康的条件：
+realpath 后就是 `$ROOT/dist/daemon.js`（ROOT 是纯数据目录时为脚本所在仓库的 `dist/daemon.js`）。**只有身份完全核实才会 kill**；pid 被复用的无关进程绝不会被误杀。判定健康的条件：
 
 - 身份核实，且
 - 进程启动不足 90 秒（给认证机会），或 `connected:true` 且 90 秒内更新，
@@ -140,7 +153,7 @@ bash keepalive.sh --uninstall-cron
 
 被顶号后 daemon 会主动退出、等保活拉起。此外：
 
-- **hook 兜底拉起**：hook 每 5 秒轮询时顺便看心跳，超过 90 秒没更新就直接调用 `keepalive.sh`（最多每 2 分钟一次），不依赖 cron——Muse 虚拟机重启后 cron 不一定在
+- **hook 兜底拉起**：hook 每 5 秒轮询时顺便看心跳，超过 90 秒没更新就直接调用 `keepalive.sh`（最多每 2 分钟一次；带上 `NODE_BIN`，hook 的 PATH 里没有 node 时用 keepalive 记下的 `.node-bin`），不依赖 cron——Muse 虚拟机重启后 cron 不一定在
 - **静默断线**：SDK 每 30 秒发心跳，连续 2 次没收到回应就判定断线并自动重连
 - **积压告警**：回复在 `outbox/` 里超过 3 分钟没发出，hook 会唤醒 Muse 排查（同一故障每小时最多提醒一次）
 
@@ -185,9 +198,14 @@ bash keepalive.sh --uninstall-cron
   - 等回复超时 → 写墓碑 `expired/<id>.tombstone`，inbox 文件移到 `expired/`（留 `<id>.timeout`），之后迟到的 outbox 文件直接移到 `expired/`，不再补发。
 - **卡片点击**：演示按钮（`demo_confirm`/`demo_cancel`）daemon 原地处理；其它按钮 daemon 先把卡片更新为
   **同 card_type** 的"✅ 已收到"（基于原卡片快照，保留类型必填字段），再往 inbox 写一条
-  `{"type":"card_event","eventKey","taskId","text":"[卡片点击] <key>", ...}`，messageId 形如 `card-<事件msgid>`。
-  助手处理后照常写 `outbox/<该 messageId>.json`（带 `chatId`），由排空**主动推送**。
+  `{"type":"card_event","eventKey","taskId","senderIsOwner","text":"[卡片点击] <key>", ...}`，messageId 形如 `card-<24 位 hex>`
+  （由 task_id + event_key + 会话键〔群聊再加点击人〕+ 回调 msgid 算 sha256 取前 24 位；同一 id 已被占用——还在 inbox、已认领、outbox / inflight 里有回复、
+  已归档或有墓碑——时追加 `-r<n>`）。同一会话 10 分钟内重复点同一按钮只入队一次；群里不同成员的点击各算各的。
+  助手处理后照常写 `outbox/<该 messageId>.json`（`chatId` 写原会话），由排空**主动推送**。
 - **防重**：`sent/` 里有就说明已回过，处理程序应跳过。
+- **messageId**：企业微信 msgid 会拼进文件名，只含 `A-Za-z0-9_@.-`（字母数字开头、≤128 位）的原样用，其余（含 `/`、`..` 等）换成 `m-<sha256 前 32 位>`。
+
+`src/` 下三个冒烟脚本（`send-test.mjs`、`send-file.mjs`、`send-card-demo.mjs`）都认 `MUSE_WECOM_ROOT`，但都**不走** `proxy` 配置：只能经代理出网的机器上用不了，直接用 daemon 联调即可。
 
 `src/` 下有三个独立小脚本（都会顶掉 daemon 连接，用完记得重启 daemon）：
 
@@ -208,13 +226,14 @@ bash keepalive.sh --uninstall-cron
 ```json
 {
   "messageId": "proactive-1699999999",
-  "chatId": "目标用户userid",
+  "chatId": "主人的userid（或授权群的chatid）",
   "text": "早报内容（支持 markdown）",
   "ts": "2026-10-10T08:05:00"
 }
 ```
 
 daemon 认证成功时 + 每 60 秒排空一次（进程内互斥，不会并发跑两遍），无人等待的 outbox 会走**主动推送**发出。
+0.3.5 起主动推送的目标只能是主人私聊（`allowedUserIds` 里的 userid）或授权群（`allowedChatIds`），其他 `chatId` 整条进 `failed/`（没有主人、`allowAll: true` 时不限）。
 长文本按 20000 字节分成多条 markdown 发送。`src/wecom-morning-brief.py` 是个例子：
 每天 08:05 拉 DPMC 资讯面板近 24 小时资讯（`published_at` 按 Asia/Shanghai 解释、带时区比较，与机器时区无关），
 生成早报写入 `<ROOT>/outbox`，配个 cron 就行。
@@ -290,7 +309,7 @@ muse-wecom-bridge/
 │   ├── test/                # node --test 离线测试（假客户端，不连网）
 │   ├── wecom-morning-brief.py # DPMC 早报生成（主动推送示例）
 │   ├── send-test.mjs / send-file.mjs / send-card-demo.mjs  # 冒烟测试脚本
-├── keepalive.sh             # 保活脚本（ROOT = 脚本所在目录）
+├── keepalive.sh             # 保活脚本（ROOT = 脚本所在目录，可用 MUSE_WECOM_ROOT 指向数据目录）
 ├── DESIGN.md                # 架构设计说明
 ├── README.md                # 本文件
 ├── package.json
@@ -301,11 +320,11 @@ muse-wecom-bridge/
 ├── inbox/ outbox/ sent/     # 消息队列目录（运行时生成）
 ├── failed/ expired/ progress/ # 永久失败 / 超时过期 / 投递进度
 ├── inflight/                # 正在发送的回复（崩溃后重启自动移回 outbox/）
-├── incoming/ outgoing/      # 收到的媒体 / 待发出的文件（外发文件放 outgoing/）
+├── incoming/ outgoing/      # 收到的媒体 / 待发出的文件（外发文件放 outgoing/；仓库自带空目录，daemon 启动时也会建）
 ├── feedback_raw/            # 点赞回调原始 payload 转储
-└── state.json heartbeat.json cards.json card_events.json daemon.pid daemon.lock debug.log  # 运行时状态（均不提交）
+└── state.json heartbeat.json cards.json card_events.json routes.json daemon.pid daemon.lock debug.log .node-bin  # 运行时状态（均不提交）
 
-运行时清理（每小时）：`incoming/`、`feedback_raw/` 保留 7 天；`sent/`、`expired/`、`failed/` 保留 30 天；
+运行时清理（每小时）：`incoming/`、`feedback_raw/` 保留 7 天（`feedback_raw/` 只记白名单内的人的点赞）；`routes.json` 只保留 7 天内、最多 5000 条；`sent/`、`expired/`、`failed/` 保留 30 天；
 `debug.log` 超过 10MB 轮转为 `debug.log.1`（只保留 1 份）。
 ```
 
