@@ -8,12 +8,12 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import type { MuseBackend, InboxItem } from "./muse-backend.js";
+import { isSafeMessageId, type MuseBackend, type InboxItem } from "./muse-backend.js";
 import type { BridgeConfig } from "./config.js";
 import { cleanIds, cleanUserIds, makeIsAllowed, pairingPending } from "./config.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./logger.js";
-import { CardEventDedupe, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
+import { CardEventDedupe, MessageRoutes, type SeenStore, type HeartbeatWriter, type CardRegistry, type CardRecord } from "./state.js";
 import { atomicWriteJson, errText, pruneOldFiles } from "./fsutil.js";
 import { chunkByBytes } from "./chunk.js";
 import { parseStreamText, streamDisplayText } from "./stream.js";
@@ -73,6 +73,8 @@ export interface BridgeDeps {
   cards: CardRegistry;
   /** 0.2.1：卡片回调去重（缺省：持久化到 paths.cardEvents，TTL 10 分钟） */
   cardEvents?: CardEventDedupe;
+  /** 0.3.5：入队消息的来源会话表（缺省：持久化到 paths.routes） */
+  routes?: MessageRoutes;
   log: LogFn;
   /** 被顶号后退出（默认 process.exit）——测试注入 */
   exit?: (code: number) => void;
@@ -106,6 +108,16 @@ export function feedbackId(tag: string): string {
 /** 会话键：群聊用 chatid、单聊用 userid（与 outbox 的 chatId、卡片登记表保持一致）。 */
 export function chatKeyOf(body: { chatid?: unknown; from?: { userid?: unknown } } | undefined): string {
   return String(body?.chatid || body?.from?.userid || "");
+}
+
+/**
+ * 0.3.5：企业微信 msgid → 本地消息 ID（会拼进 inbox/outbox/sent… 的文件名）。
+ * 安全的原样用（兼容以前）；含路径分隔符、..、超长等不安全字符的换成 `m-<sha256 前 32 位>`（确定性，去重照样有效）。
+ */
+export function messageIdOf(raw: unknown): string {
+  const s = raw == null ? "" : String(raw);
+  if (!s || isSafeMessageId(s)) return s;
+  return `m-${createHash("sha256").update(s).digest("hex").slice(0, 32)}`;
 }
 
 function safeIdPart(s: string): string {
@@ -196,7 +208,57 @@ export function createBridge(d: BridgeDeps) {
       c.loadSync();
       return c;
     })();
+  const routes =
+    d.routes ??
+    (() => {
+      const r = new MessageRoutes(paths.routes);
+      r.loadSync();
+      return r;
+    })();
   let isAllowed = makeIsAllowed(config);
+
+  /** 说话人是不是主人（daemon 判定，写进 inbox 的 senderIsOwner）：没有主人、allowAll 时人人算主人 */
+  function isOwner(userid: string): boolean {
+    const owners = cleanUserIds(config.allowedUserIds);
+    if (!owners.length) return config.allowAll === true;
+    return owners.includes(userid);
+  }
+
+  /** 主人允许主动推送的会话：主人私聊（allowedUserIds）、授权群（allowedChatIds）；没有主人且 allowAll 时不限 */
+  function ownerAllowsChat(chatId: string): boolean {
+    const owners = cleanUserIds(config.allowedUserIds);
+    if (!owners.length) return config.allowAll === true;
+    return owners.includes(chatId) || cleanIds(config.allowedChatIds).includes(chatId);
+  }
+
+  /**
+   * 0.3.5：排空主动推送前校验 outbox 的 chatId（daemon 硬约束，不靠提示词）：
+   *   - 有来源记录：等于原会话放行；原消息是主人发的，主人私聊 / 授权群也放行；否则拒绝；
+   *   - 没有来源记录（proactive-* 主动推送、来源已过期）：只能发到主人私聊或授权群。
+   */
+  function checkRoute(p: ReplyPayload): string | null {
+    const r = routes.get(p.messageId);
+    if (r) {
+      if (p.chatId === r.chatId) return null;
+      if (r.senderIsOwner && ownerAllowsChat(p.chatId)) return null;
+      return r.senderIsOwner
+        ? `chatId（${p.chatId}）既不是原会话，也不是主人私聊或授权群，拒绝发送`
+        : `chatId（${p.chatId}）与原会话（${r.chatId}）不符：非主人发起的消息只能回到原会话`;
+    }
+    if (ownerAllowsChat(p.chatId)) return null;
+    return `chatId（${p.chatId}）不是主人私聊或授权群，主动推送被拒`;
+  }
+
+  /** 入队：先记来源会话（排空时校验 chatId 用），再写 inbox */
+  async function enqueueItem(item: InboxItem): Promise<void> {
+    await routes.record(item.messageId, {
+      chatId: item.chatId,
+      chatType: item.chatType,
+      senderUserId: item.senderUserId,
+      senderIsOwner: item.senderIsOwner === true,
+    });
+    await backend.enqueue(item);
+  }
   const exit = d.exit ?? ((code: number) => process.exit(code));
   const kickExitDelayMs = d.kickExitDelayMs ?? 1500;
   const ackDelayMs = d.ackDelayMs ?? 8000;
@@ -365,6 +427,7 @@ export function createBridge(d: BridgeDeps) {
     activeWaits,
     makeChannel: (p: ReplyPayload) => proactiveChannel(p.chatId, p.messageId),
     engine,
+    checkRoute,
   });
 
   // ------------------------------------------------------------ 回复流程
@@ -635,7 +698,7 @@ export function createBridge(d: BridgeDeps) {
 
   async function handleText(frame: Frame, textOverride?: string, isVoice?: boolean): Promise<DeliverOutcome | null> {
     const body = frame.body || {};
-    const msgid = String(body.msgid || "");
+    const msgid = messageIdOf(body.msgid);
     if (!(await firstSeen(msgid))) return null;
     const w = whoOf(body);
     const { sender, chatType, chatId } = w;
@@ -673,12 +736,13 @@ export function createBridge(d: BridgeDeps) {
       chatId,
       chatType,
       senderUserId: sender,
+      senderIsOwner: isOwner(sender),
       text: (quoteCtx ? quoteCtx + "\n" : "") + (isVoice ? `(语音转写) ${text}` : text),
       ts: new Date().toISOString(),
       status: "new",
       ...(isVoice ? { isVoice: true } : {}),
     };
-    await backend.enqueue(item);
+    await enqueueItem(item);
     return deliverReplyWithAck(frame, msgid, chatId);
   }
 
@@ -686,7 +750,7 @@ export function createBridge(d: BridgeDeps) {
     const body = frame.body || {};
     const transcribed = String(body.voice?.content || "").trim();
     if (transcribed) return handleText(frame, transcribed, true);
-    const msgid = String(body.msgid || "");
+    const msgid = messageIdOf(body.msgid);
     if (!(await firstSeen(msgid))) return null;
     if (blocked(whoOf(body), { msgid, kind: "voice" })) return null;
     await replyStreamText(frame, "没听清，再说一遍？").catch(() => undefined);
@@ -695,7 +759,7 @@ export function createBridge(d: BridgeDeps) {
 
   async function handleMixed(frame: Frame): Promise<void> {
     const body = frame.body || {};
-    const msgid = String(body.msgid || "");
+    const msgid = messageIdOf(body.msgid);
     if (!(await firstSeen(msgid))) return;
     if (blocked(whoOf(body), { msgid, kind: "mixed" })) return;
     await replyStreamText(frame, "图文混排的消息我还看不太懂，分开发送试试。").catch(() => undefined);
@@ -720,7 +784,7 @@ export function createBridge(d: BridgeDeps) {
 
   async function handleMedia(frame: Frame, kind: "image" | "file" | "video"): Promise<DeliverOutcome | null> {
     const body = frame.body || {};
-    const msgid = String(body.msgid || "");
+    const msgid = messageIdOf(body.msgid);
     if (!(await firstSeen(msgid))) return null;
     const w = whoOf(body);
     const { sender, chatType, chatId } = w;
@@ -735,6 +799,7 @@ export function createBridge(d: BridgeDeps) {
       chatId,
       chatType,
       senderUserId: sender,
+      senderIsOwner: isOwner(sender),
       text: (quoteCtx ? quoteCtx + "\n" : "") + (saved ? label : `${label}（下载失败，请重发一次）`),
       ts: new Date().toISOString(),
       status: "new",
@@ -742,7 +807,7 @@ export function createBridge(d: BridgeDeps) {
       ...(saved && kind === "file" ? { filePath: saved.path } : {}),
       ...(saved && kind === "video" ? { videoPath: saved.path } : {}),
     };
-    await backend.enqueue(item);
+    await enqueueItem(item);
     log("daemon.msg", { msgid, sender, chatType, kind });
     return deliverReplyWithAck(frame, msgid, chatId);
   }
@@ -762,11 +827,12 @@ export function createBridge(d: BridgeDeps) {
     const body = frame.body || {};
     const ev = body.event || {};
     const from = String(body.from?.userid || "");
+    // 0.3.5：先判白名单再落盘，白名单外的人点赞不再写 feedback_raw/
+    if (blocked(whoOf(body), { kind: "feedback" })) return;
     log("daemon.feedback", { from, body: JSON.stringify(body).slice(0, 2000) });
     await mkdir(paths.feedbackRaw, { recursive: true })
       .then(() => writeFile(join(paths.feedbackRaw, `${Date.now()}.json`), JSON.stringify(body, null, 2)))
       .catch(() => undefined);
-    if (blocked(whoOf(body), { kind: "feedback" })) return;
     // 真实 payload：event.feedback_event.{id,type}；type 1=👍 2=👎（3 待确认）
     const fb = ev.feedback_event || ev.feedback || ev.data || {};
     const ftype: unknown = fb.type ?? fb.feedback_type ?? ev.type;
@@ -835,20 +901,27 @@ export function createBridge(d: BridgeDeps) {
 
     if (!forward) return;
     // 0.2.1：去重键 = task_id + event_key + 会话键（chatid || from），TTL 内重复回调只入队一次（卡片照样更新）
-    const dedupeKey = CardEventDedupe.keyOf(taskId, eventKey, chatKey || from);
+    // 0.3.5：群聊再带上点击人（chatid|userid），群里不同成员点同一按钮各自入队，不会被第一个人的点击吞掉
+    const isGroup = String(body.chattype || "") === "group";
+    const dedupeKey = CardEventDedupe.keyOf(taskId, eventKey, isGroup ? `${chatKey}|${from}` : chatKey || from);
     if (!cardEvents.firstSeen(dedupeKey)) {
       log("daemon.card_event_duplicate", { eventKey, taskId, from });
       return;
     }
     const evMsgid = String(body.msgid || "");
+    // 0.3.5：还在处理中的（inbox 已认领、outbox / inflight 里有回复）也算占用，没有 msgid 时不会复用进行中那一轮的 id
     const done = (id: string) =>
-      existsSync(join(paths.inbox, `${id}.json`)) || outbox.hasTombstone(id) || ["sent", "failed", "expired"].includes(outbox.locate(id));
+      existsSync(join(paths.inbox, `${id}.json`)) ||
+      existsSync(join(paths.inbox, `${id}.json.claimed`)) ||
+      outbox.hasTombstone(id) ||
+      outbox.locate(id) !== "none";
     const messageId = cardEventMessageId(dedupeKey, evMsgid, done);
     const item: InboxItem = {
       messageId,
       chatId: chatKey,
       chatType: String(body.chattype || "single"),
       senderUserId: from,
+      senderIsOwner: isOwner(from),
       text: `[卡片点击] ${eventKey}`,
       ts: new Date().toISOString(),
       status: "new",
@@ -856,7 +929,7 @@ export function createBridge(d: BridgeDeps) {
       eventKey,
       taskId,
     };
-    await backend.enqueue(item);
+    await enqueueItem(item);
     log("daemon.card_event_enqueued", { messageId, eventKey, taskId });
   }
 
@@ -967,6 +1040,8 @@ export function createBridge(d: BridgeDeps) {
     activeWaits,
     engine,
     cardEvents,
+    routes,
+    checkRoute,
     attach,
     startTimers,
     drain,
