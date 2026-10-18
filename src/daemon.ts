@@ -16,7 +16,7 @@ import { MuseBackend } from "./muse-backend.js";
 import { makePaths, resolveRoot } from "./paths.js";
 import { cleanIds, isPlaceholder, loadConfig, loadSecrets, pairingPending, validateConfig, type BridgeConfig } from "./config.js";
 import { RotatingLogger } from "./logger.js";
-import { CardEventDedupe, CardRegistry, HeartbeatWriter, SeenStore, removePidFileSync, writePidFile } from "./state.js";
+import { CardEventDedupe, CardRegistry, HeartbeatWriter, MessageRoutes, SeenStore, removePidFileSync, writePidFile } from "./state.js";
 import { selfIdentity } from "./proc.js";
 import { acquireInstanceLock, releaseInstanceLock } from "./lock.js";
 import { OutboxStore } from "./outbox.js";
@@ -105,6 +105,7 @@ async function main(): Promise<void> {
   // 不再依赖 keepalive 的"先检查再拉起"。
   await mkdir(paths.root, { recursive: true });
   await mkdir(paths.stream, { recursive: true });
+  await mkdir(paths.outgoing, { recursive: true }); // 外发文件的默认允许目录（目录不存在时这个允许根会被忽略）
   const self = selfIdentity();
   const lock = acquireInstanceLock(paths.lock, self);
   if (!lock.ok) return fail(`${lock.reason}（见 ${paths.lock}）`, 1);
@@ -144,6 +145,8 @@ async function main(): Promise<void> {
   cards.loadSync();
   const cardEvents = new CardEventDedupe(paths.cardEvents);
   cardEvents.loadSync();
+  const routes = new MessageRoutes(paths.routes);
+  routes.loadSync();
   const heartbeat = new HeartbeatWriter(paths.heartbeat, process.pid, Date.now, self.token);
   await heartbeat.init();
 
@@ -173,6 +176,7 @@ async function main(): Promise<void> {
     heartbeat,
     cards,
     cardEvents,
+    routes,
     log,
     exit: (code) => {
       void logger.flush().finally(() => process.exit(code));
