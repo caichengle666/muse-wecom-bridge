@@ -199,7 +199,8 @@ test("bug11: 演示按钮原地处理、不进 inbox", async () => {
 });
 
 test("bug11: task_id 回退表按会话键（群聊 chatid）一致登记与查找", async () => {
-  const env = await makeEnv();
+  // 0.3.5：主动推送只能发到主人私聊或授权群，所以这里把 GROUP1 授权
+  const env = await makeEnv({ config: { allowedUserIds: ["owner"], allowedChatIds: ["GROUP1"] } });
   // 主动推送到群
   await writeOutbox(env, "g1", { chatId: "GROUP1", text: "", card: { card_type: "button_interaction", task_id: "gt1", button_list: [{ text: "好", key: "ok" }] } });
   await env.bridge.drain();
