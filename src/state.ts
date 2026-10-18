@@ -263,3 +263,73 @@ export class CardEventDedupe {
     return this.q.run(() => atomicWriteJson(path, { events: Object.fromEntries(this.seen) })).catch(() => undefined);
   }
 }
+
+export interface MessageRoute {
+  /** 消息所在会话：群聊 chatid、单聊 userid（与 inbox 的 chatId 相同） */
+  chatId: string;
+  chatType: string;
+  senderUserId: string;
+  senderIsOwner: boolean;
+  ts: number;
+}
+
+/**
+ * 0.3.5：入队消息的来源会话表（messageId → 会话 + 说话人是不是主人），记在 routes.json（原子写）。
+ * 排空主动推送时据此校验 outbox 的 chatId：非主人发起的只能回到原会话；主人发起的还可以发到主人私聊或授权群。
+ * 带 TTL（默认 7 天）和条数上限（默认 5000），比 sent/ 之类的归档目录先过期也没关系：过期后按"没有来源"的主动推送处理。
+ */
+export class MessageRoutes {
+  private byId = new Map<string, MessageRoute>();
+  private readonly q = new SerialQueue();
+
+  constructor(
+    private readonly path: string | null,
+    private readonly ttlMs: number = 7 * 86400_000,
+    private readonly max: number = 5000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  loadSync(): void {
+    if (!this.path) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.path, "utf8")) as { routes?: Record<string, Partial<MessageRoute>> };
+      const t = this.now();
+      for (const [id, r] of Object.entries(raw.routes || {})) {
+        if (!r || typeof r.chatId !== "string" || typeof r.ts !== "number" || t - r.ts >= this.ttlMs) continue;
+        this.byId.set(id, {
+          chatId: r.chatId,
+          chatType: typeof r.chatType === "string" ? r.chatType : "",
+          senderUserId: typeof r.senderUserId === "string" ? r.senderUserId : "",
+          senderIsOwner: r.senderIsOwner === true,
+          ts: r.ts,
+        });
+      }
+    } catch {
+      /* 无文件或损坏：从空开始 */
+    }
+  }
+
+  get(id: string): MessageRoute | undefined {
+    const r = this.byId.get(id);
+    if (r && this.now() - r.ts >= this.ttlMs) return undefined;
+    return r;
+  }
+
+  /** 记下并持久化（入队前调用，等它写完再写 inbox：worker 拿到消息时来源一定已落盘） */
+  record(id: string, r: Omit<MessageRoute, "ts">): Promise<void> {
+    const t = this.now();
+    this.byId.delete(id);
+    this.byId.set(id, { ...r, ts: t });
+    for (const [k, v] of this.byId) {
+      if (this.byId.size <= this.max && t - v.ts < this.ttlMs) break;
+      this.byId.delete(k);
+    }
+    return this.persist();
+  }
+
+  persist(): Promise<void> {
+    if (!this.path) return Promise.resolve();
+    const path = this.path;
+    return this.q.run(() => atomicWriteJson(path, { routes: Object.fromEntries(this.byId) })).catch(() => undefined);
+  }
+}
