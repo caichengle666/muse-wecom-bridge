@@ -16,11 +16,23 @@ import { setTimeout as delay } from "node:timers/promises";
 import { parseOutboxPayload, type ReplyPayload } from "./outbox.js";
 import type { LogFn } from "./logger.js";
 
+/** 能直接拼进文件名的消息 ID：字母数字开头，只含 A-Z a-z 0-9 _ @ . -，最长 128（不会是 . / .. ，不含路径分隔符） */
+export const SAFE_MESSAGE_ID = /^[A-Za-z0-9_@-][A-Za-z0-9_@.-]{0,127}$/;
+
+export function isSafeMessageId(id: string): boolean {
+  return SAFE_MESSAGE_ID.test(id);
+}
+
 export interface InboxItem {
   messageId: string;
   chatId: string;
   chatType: string;
   senderUserId: string;
+  /**
+   * 0.3.5：daemon 入队时按内存里的 allowedUserIds 判定说话人是不是主人（没有主人、allowAll 时人人算主人）。
+   * worker 据此决定权限，不要自己读 config.json 判断。
+   */
+  senderIsOwner?: boolean;
   text: string;
   ts: string;
   status: "new";
@@ -74,6 +86,8 @@ export class MuseBackend {
 
   /** Hand a WeCom message to the Muse agent via the inbox queue. */
   async enqueue(item: InboxItem): Promise<void> {
+    // 0.3.5：messageId 会拼进文件路径，不安全的一律拒绝（入口已用 messageIdOf 清洗，这里是兜底）
+    if (!isSafeMessageId(item.messageId)) throw new Error(`messageId 含不安全字符：${JSON.stringify(item.messageId).slice(0, 80)}`);
     const tmp = join(this.dirs.inbox, `${item.messageId}.tmp`);
     const fin = join(this.dirs.inbox, `${item.messageId}.json`);
     await writeFile(tmp, JSON.stringify(item, null, 2), "utf8");
