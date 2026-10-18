@@ -18,6 +18,8 @@ export interface Paths {
   lock: string;
   /** 0.2.1：卡片回调去重表 */
   cardEvents: string;
+  /** 0.3.5：入队消息的来源会话（messageId → chatId / 是否主人），排空时校验 outbox 的 chatId */
+  routes: string;
   cards: string;
   debugLog: string;
   inbox: string;
@@ -56,6 +58,7 @@ export function makePaths(root: string): Paths {
     pid: join(r, "daemon.pid"),
     lock: join(r, "daemon.lock"),
     cardEvents: join(r, "card_events.json"),
+    routes: join(r, "routes.json"),
     cards: join(r, "cards.json"),
     debugLog: join(r, "debug.log"),
     inbox: join(r, "inbox"),
