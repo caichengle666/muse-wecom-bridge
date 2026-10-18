@@ -635,6 +635,11 @@ export interface DrainDeps {
   activeWaits: Set<string>;
   makeChannel: (p: ReplyPayload) => Channel;
   engine: EngineOptions;
+  /**
+   * 0.3.5：主动推送前校验目标会话。返回 null 放行，返回字符串 = 拒绝原因（整条进 failed/，不发送）。
+   * 缺省不校验（兼容旧调用方）。
+   */
+  checkRoute?: (p: ReplyPayload) => string | null;
 }
 
 export interface DrainReport {
@@ -737,6 +742,13 @@ export class OutboxDrainer {
         if (!payload.chatId) {
           await store.fail(id, "缺少 chatId，无法主动推送");
           rep.failed.push(id);
+          continue;
+        }
+        const denied = this.d.checkRoute ? this.d.checkRoute(payload) : null;
+        if (denied) {
+          await store.fail(id, denied);
+          rep.failed.push(id);
+          log("daemon.drain_route_rejected", { msgid: id, chatId: payload.chatId, reason: denied });
           continue;
         }
         const res = await runDelivery(store, payload, this.d.makeChannel(payload), engine);
