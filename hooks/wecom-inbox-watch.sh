@@ -30,7 +30,29 @@ set -euo pipefail
 source "$HATCH_HOOK_RUNTIME"
 
 NAME="wecom"                                    # 状态文件前缀
-BRIDGE_ROOT="$HOME/workspace/muse-wecom-bridge"  # 桥接部署目录：装在别处就改这一行
+# 桥接部署目录：优先 MUSE_WECOM_ROOT；否则默认 ~/workspace/muse-wecom-bridge；默认目录不是本桥接时，
+# 在 $HOME 下（3 层内）找 package.json 名为 muse-wecom-bridge 的目录，唯一一个才用，结果缓存到 ~/hooks/state。
+# 装在别处一般不用改脚本；装了多份时用 MUSE_WECOM_ROOT 或直接改下面 DEFAULT_BRIDGE_ROOT。
+DEFAULT_BRIDGE_ROOT="$HOME/workspace/muse-wecom-bridge"
+is_wecom_bridge() { [ -f "$1/keepalive.sh" ] && grep -q '"name": *"muse-wecom-bridge"' "$1/package.json" 2>/dev/null; }
+resolve_bridge_root() {
+  local cache="$HOME/hooks/state/.wecom-bridge-root" c found=""
+  if [ -n "${MUSE_WECOM_ROOT:-}" ]; then printf '%s\n' "$MUSE_WECOM_ROOT"; return; fi
+  if is_wecom_bridge "$DEFAULT_BRIDGE_ROOT"; then printf '%s\n' "$DEFAULT_BRIDGE_ROOT"; return; fi
+  c="$(cat "$cache" 2>/dev/null || true)"
+  if [ -n "$c" ] && is_wecom_bridge "$c"; then printf '%s\n' "$c"; return; fi
+  found="$(find "$HOME" -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null \
+    | while read -r f; do d="$(dirname "$f")"; if is_wecom_bridge "$d"; then printf '%s\n' "$d"; fi; done || true)"
+  if [ -n "$found" ] && [ "$(printf '%s\n' "$found" | wc -l)" -eq 1 ]; then
+    mkdir -p "$(dirname "$cache")" && printf '%s\n' "$found" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+    printf '%s\n' "$found"; return
+  fi
+  if [ -n "$found" ]; then
+    echo "wecom-inbox-watch: 在 \$HOME 下找到多份 muse-wecom-bridge，退回默认 $DEFAULT_BRIDGE_ROOT；请设 MUSE_WECOM_ROOT 或改 DEFAULT_BRIDGE_ROOT：$(printf '%s' "$found" | tr '\n' ' ')" >&2
+  fi
+  printf '%s\n' "$DEFAULT_BRIDGE_ROOT"   # 找不到或不唯一：退回默认（doctor 会报 FAIL）
+}
+BRIDGE_ROOT="$(resolve_bridge_root)"
 INBOX="$BRIDGE_ROOT/inbox"
 CTX_DIR="$HOME/hooks/state"
 # 认领有效期：必须大于 daemon 的回复超时（config.json replyTimeoutMin，默认 20 分钟），这里取超时 + 5 分钟。
@@ -410,11 +432,17 @@ if [ "$count" -eq 0 ]; then
   fi
   # 自愈：心跳停了 90 秒就直接拉起 daemon（keepalive 自己判断健康、核实身份、带锁，健康时什么也不做）
   HEAL_MARK="$CTX_DIR/.$NAME-heal-attempt"
-  if [ "$hb_age" -gt "$HEAL_AFTER_SECS" ] && [ -f "$BRIDGE_ROOT/keepalive.sh" ]; then
+  # keepalive.sh 位置：一般就在 BRIDGE_ROOT；MUSE_WECOM_ROOT 指向纯数据目录时，keepalive 运行时会把自己的路径记在 .keepalive-path
+  KA_SH="$BRIDGE_ROOT/keepalive.sh"
+  [ -f "$KA_SH" ] || KA_SH="$(cat "$BRIDGE_ROOT/.keepalive-path" 2>/dev/null || true)"
+  if [ "$hb_age" -gt "$HEAL_AFTER_SECS" ] && [ -n "$KA_SH" ] && [ -f "$KA_SH" ]; then
     last_heal=$(stat -c %Y "$HEAL_MARK" 2>/dev/null || echo 0)
     if [ $((now - last_heal)) -ge "$HEAL_EVERY_SECS" ]; then
       touch "$HEAL_MARK"
-      setsid bash "$BRIDGE_ROOT/keepalive.sh" >/dev/null 2>&1 < /dev/null &
+      # hook 运行时的 PATH 里可能没有 nvm 的 node：用 keepalive / --install-cron 记下的 .node-bin 兜底
+      ka_node="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+      [ -n "$ka_node" ] || ka_node="$(cat "$BRIDGE_ROOT/.node-bin" 2>/dev/null || true)"
+      NODE_BIN="$ka_node" MUSE_WECOM_ROOT="$BRIDGE_ROOT" setsid bash "$KA_SH" >/dev/null 2>&1 < /dev/null &
     fi
   fi
   if [ ! -f "$HB" ]; then
@@ -447,7 +475,7 @@ if [ "$count" -eq 0 ]; then
     silent "inbox empty; unhealthy, already alerted" '{}'
   fi
   touch "$MARK"
-  wake "$NAME 桥接异常：$issue" "$(jq -n -c --arg i "$issue" '{count:0,message_ids:[],health_issue:$i}')"
+  wake "$NAME 桥接异常：$issue" "$(jq -n -c --arg i "$issue" --arg r "$BRIDGE_ROOT" '{count:0,message_ids:[],health_issue:$i,bridge_root:$r}')"
 fi
 
 # ---- 步骤 4：组装上下文文件 ----
@@ -457,4 +485,4 @@ ctx_file="$(py context "${claimed[@]}" 2>/dev/null || true)"
 if [ -n "$ctx_file" ] && [ -f "$ctx_file" ]; then ctx_ref="$(printf '%s' "$ctx_file" | jq -R .)"; else ctx_ref=null; fi
 
 # 轮询本身不写日志（5 秒一次会刷屏）；wake 由运行时记录。
-wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_bytes\":$MAX_BYTES,\"context_file\":$ctx_ref}"
+wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_bytes\":$MAX_BYTES,\"context_file\":$ctx_ref,\"bridge_root\":$(printf '%s' "$BRIDGE_ROOT" | jq -R .)}"
