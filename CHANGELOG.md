@@ -1,5 +1,22 @@
 # 更新日志
 
+## 0.3.5
+
+- 修复（H1）授权群里非主人的权限只靠提示词黑名单：
+  - daemon 入队时自己判定说话人是不是主人，inbox 新增 `senderIsOwner`（没有主人、`allowAll` 时人人算主人），worker 只看它，不再自己读 config 判断；
+  - daemon 在 `routes.json` 记下每条消息的来源会话（7 天、最多 5000 条），排空主动推送时校验 outbox 的 `chatId`：非主人发起的只能回原会话；主人发起的还可以发主人私聊或授权群；没有来源记录的（`proactive-*`）只能发主人私聊或授权群。不符的整条进 `failed/`，日志 `daemon.drain_route_rejected`；
+  - hook prompt 2a3 改成白名单："senderIsOwner=false 时只许做什么"——只做对话问答、读本条附件和本会话上下文、只往原会话回文字/卡片；不执行命令、不读写本机其他文件（凭证、别人的附件、`~/hooks/state` 下其他会话尤其主人私聊的上下文）、不改配置、不给别的会话发消息、不把他的卡片点击当作主人的确认；README 写明残余风险
+- 修复（M1，同飞书桥 0.5.5）：hook 写死桥接目录。现在 `MUSE_WECOM_ROOT` 优先，否则默认 `~/workspace/muse-wecom-bridge`，默认目录不是本桥接时在 `$HOME` 下 3 层内找 package.json 名为 `muse-wecom-bridge` 的唯一副本（缓存到 `~/hooks/state/.wecom-bridge-root`），多份时退回默认并在 stderr 提示；wake payload（含健康告警）带 `bridge_root`，prompt 里的路径全部改成 `<bridge_root>/…`；doctor 用 hook 自己的定位函数核对，hook 定义还是旧版（路径写死）时提醒重新注册
+- 修复（M2）：群里卡片点击按会话去重，第二个人 10 分钟内点同一按钮会被吞掉。群聊去重键加上点击人
+- 修复（L1）：卡片回调没有 msgid 时，新 messageId 可能撞上还在处理中的上一轮（已认领、outbox / inflight 里有回复的也算占用了）
+- 修复（L2）：msgid 未清洗就拼进文件路径。只含 `A-Za-z0-9_@.-`（字母数字开头、≤128 位）的原样用，其余换成确定性的 `m-<sha256 前 32 位>`；`backend.enqueue` 兜底拒绝不安全的 id
+- 修复（L3）：`MUSE_WECOM_ROOT` 指向纯数据目录时 keepalive 找不到 `dist/daemon.js`。现在数据目录里没有时用脚本所在仓库的；`--install-cron` 写仓库里的 `keepalive.sh` 并带上 `MUSE_WECOM_ROOT`（ROOT 就是脚本目录时条目和以前一样）；doctor 也认 `MUSE_WECOM_ROOT`；`send-test.mjs`、`send-card-demo.mjs` 也认它
+- 修复（L4）：hook 兜底拉起 keepalive 时没带 `NODE_BIN`。keepalive 运行和 `--install-cron` 时把 node 绝对路径记到 `<ROOT>/.node-bin`（数据目录与代码分开时再记 `.keepalive-path`），hook 拉起时传 `NODE_BIN`（PATH 里没有 node 就用 `.node-bin`）和 `MUSE_WECOM_ROOT`；keepalive 自己找不到 node 时也读 `.node-bin`
+- 修复（L6）：白名单外的人点赞也会写 `feedback_raw/`，现在先判白名单再落盘
+- 文档（L5、L7）：写明手改 `config.json`（尤其撤销权限）要重启 daemon；card_event 的 messageId 实际格式；prompt 第 4 步不再声称"25 分钟后重新认领重试"（超时后 daemon 移走消息、提示用户重发）；DESIGN 里的旧目录名；只支持 Linux；冒烟脚本不走 proxy。仓库补上 `outgoing/.gitkeep`，daemon 启动时也会建 `outgoing/`
+- 兼容性变化：主动推送（`proactive-*` 等没有来源记录的 outbox）以前能发给任意 userid / 群，现在只能发主人私聊或授权群（没有主人、`allowAll: true` 时不限）
+- 升级：git pull && npm ci && npm run build，重启 daemon；把 hooks/wecom-inbox-watch.sh 重新复制到 ~/hooks/scripts/；用 hooks/wecom-inbox-watch.json 重新注册 hook 定义（保留自己的 delivery.to）；装过 cron 的重新运行 `bash keepalive.sh --install-cron`
+
 ## 0.3.4
 
 - 修复授权群的越权：worker 分不出谁是主人、提示词也没有限制，授权群里任何成员都能要求它改 `config.json`（把自己加进 `allowedUserIds`、授权别的群，绕过「只有主人能 /授权本群」）或读出 `secrets.env`。hook 定义的 prompt 新增 2a3：按 claimed 文件的 `senderUserId` 认主人（自称主人不算），群里不是主人的人要求时不改 `config.json`、不读不发凭证、不删文件、不改配置
