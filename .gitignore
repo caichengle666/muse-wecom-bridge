@@ -20,6 +20,11 @@ daemon.pid
 daemon.lock
 daemon.lock.stale.*
 card_events.json
+routes.json
+.node-bin
+.node-bin.tmp.*
+.keepalive-path
+.keepalive-path.tmp.*
 stream/
 stop/
 .keepalive.lock.d/
