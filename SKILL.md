@@ -11,6 +11,7 @@
 ## 运行要求
 
 - Node.js 20.10+（`npm test` 用到 `node --test --test-concurrency`）
+- 只支持 Linux：daemon 靠 `/proc` 核验进程身份，`keepalive.sh` / `doctor.sh` 依赖 GNU coreutils（`stat -c`、`realpath -m`）和 `setsid`；测试还需要 `python3`
 - 一个企业微信**智能机器人**（API 模式 + 长连接）：`npm run onboard` 扫码自动建，或手动建后拿 BotID 和 Secret
 - 机器人可见范围内的人才能用；`config.json` 的 `allowedUserIds` 白名单 fail-closed（为空拒绝启动，除非在等配对码）；`allowedChatIds` 里的授权群所有成员也能用（主人在群里发 `/授权本群` 添加）
 
@@ -72,7 +73,7 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 
 inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建一个轮询 hook。`hooks/` 目录已备好：
 
-- `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接目录自动定位：`MUSE_WECOM_ROOT` 优先，否则默认 `~/workspace/muse-wecom-bridge`，默认目录不是本桥接时在 `$HOME` 下 3 层内找 package.json 名为 `muse-wecom-bridge` 的目录，唯一一个才用（缓存到 `~/hooks/state/.wecom-bridge-root`）；装了多份时退回默认目录并在 stderr 提示，这时设 `MUSE_WECOM_ROOT` 或改脚本里的 `DEFAULT_BRIDGE_ROOT`。wake payload 带 `bridge_root`，hook 定义的 prompt 里路径都写成 `<bridge_root>/…`，不用改。`npm run doctor` 会用 hook 自己的定位函数核对
+- `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接目录自动定位：`MUSE_WECOM_ROOT` 优先，否则默认 `~/workspace/muse-wecom-bridge`，默认目录不是本桥接时在 `$HOME` 下 3 层内找 package.json 名为 `muse-wecom-bridge` 的目录，唯一一个才用（缓存到 `~/hooks/state/.wecom-bridge-root`）；装了多份时退回默认目录并在 stderr 提示，这时设 `MUSE_WECOM_ROOT` 或改脚本里的 `DEFAULT_BRIDGE_ROOT`。wake payload（新消息和 `health_issue` 告警都）带 `bridge_root`，hook 定义的 prompt 里路径都写成 `<bridge_root>/…`，不用改。`npm run doctor` 会用 hook 自己的定位函数核对，已注册的 hook 定义还是旧版（路径写死）时会提醒重新注册
 - `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑；`poll_interval_secs` 用 5（hook 允许的最小值）
 - 轮询脚本原子认领（`<id>.json` → `<id>.json.claimed`）后 `wake`；worker 读 claimed → 写 outbox（先 `.tmp` 再 mv）→ 删 claimed
 - claimed 超过回复超时（`replyTimeoutMin`，默认 20 分钟）+ 5 分钟没被消费会被重新认领；daemon 已超时或 /stop 过（有墓碑 `expired/<id>.tombstone`）的消息不会再被认领
@@ -92,8 +93,16 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 单聊和每个群各自一份；群里多人共用一份，每轮用户消息带 `from`（说话人 userid，旧历史没有），上下文里的 turns 也带 `from`，新消息的说话人看 claimed 文件的 `senderUserId`；单聊没有 `from`
 - 群授权：主人在群里发 `@机器人 /授权本群`（`/allowgroup`）/ `/取消授权本群`（`/disallowgroup`），daemon 直接改 `config.json` 的 `allowedChatIds`、立即生效，不进 inbox；非主人发会被拒。没授权的群 @机器人 时 `debug.log` 的 `daemon.blocked_not_allowed` 带 `chatId`
-- 群成员权限：daemon 入队时写 `senderIsOwner`（说话人是不是主人），worker 只看它（自称主人不算）。`senderIsOwner=false` 时按 hook 定义 prompt 的 2a3 白名单：只做对话问答、读本条附件和本会话上下文、只往原会话回文字/卡片；不执行命令、不读写本机其他文件（凭证、别人的附件、主人私聊上下文）、不改配置、不给别的会话发消息、不把他的卡片点击当主人的确认。daemon 另外硬校验：排空时 outbox 的 `chatId` 必须是原会话（主人发起的还可以是主人私聊或授权群），`proactive-*` 只能发主人私聊或授权群
+- 群成员权限：daemon 入队时写 `senderIsOwner`（说话人是不是主人；没有主人、`allowAll: true` 时人人算主人；卡片点击的 inbox 也带），worker 只看它，不要自己读 config 判断（自称主人不算）。`senderIsOwner=false` 时按 hook 定义 prompt 的 2a3 白名单：只做对话问答、读本条附件和本会话上下文、只往原会话回文字/卡片；不执行命令、不读写本机其他文件（凭证、别人的附件、`~/hooks/state` 下其他会话尤其主人私聊的上下文）、不改配置、不给别的会话发消息、不把他的卡片点击当主人的确认
+- 回复会话校验（daemon 硬约束）：daemon 在 `routes.json` 记下每条消息的来源会话（保留 7 天、最多 5000 条）。排空（主动推送）时校验 outbox 的 `chatId`：非主人发起的只能回原会话；主人发起的还可以发主人私聊或授权群；没有来源记录的（`proactive-*`，或来源记录已过期）只能发主人私聊或授权群。不符的整条进 `failed/`，`debug.log` 记 `daemon.drain_route_rejected`
 - 手改 `config.json`（尤其撤销 `allowedUserIds` / `allowedChatIds`）要重启 daemon 才生效；`/授权本群`、配对码是 daemon 自己改的，立即生效
+
+## outbox、卡片点击与主动推送
+
+- 回复写 `outbox/<messageId>.json`：`{"messageId","chatId","text","ts"}`（先 `.tmp` 再 mv，用标准 JSON 序列化），可选 `file`（绝对路径，只允许 `outgoing/`、系统临时目录、`/tmp` 等 `allowedFileRoots` 之下，敏感文件名一律拒绝）、`images`、`card`（TemplateCard，要收按钮回调就带唯一 `task_id`）；发送失败看 `failed/<id>.reason.json`。`outgoing/` 仓库自带，daemon 启动时也会建
+- messageId 会拼进文件名：企业微信 msgid 只含 `A-Za-z0-9_@.-`（字母数字开头、≤128 位）的原样用，其余换成 `m-<sha256 前 32 位>`，按 inbox 里的 `messageId` 原样写 outbox 即可
+- 卡片点击：inbox 里是 `{"type":"card_event","eventKey","taskId","senderIsOwner","text":"[卡片点击] <key>",…}`，messageId 形如 `card-<24 位 hex>`（撞上还在处理或已归档的 id 时追加 `-r<n>`）；照常写 `outbox/<该 messageId>.json`（`chatId` 写原会话），由排空主动推送。同一会话 10 分钟内重复点同一按钮只入队一次，群里按点击人分开去重
+- 主动推送：往 `outbox/` 写 `proactive-<时间戳>.json`（`chatId` 填主人的 userid 或授权群的 chatid），daemon 认证成功时 + 每 60 秒排空一次。0.3.5 起目标只能是主人私聊（`allowedUserIds`）或授权群（`allowedChatIds`），其他 `chatId` 整条进 `failed/`（没有主人、`allowAll: true` 时不限）
 
 ## 流式输出（打字机效果）
 
@@ -108,9 +117,20 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 ## 保活与自检
 
 - daemon：心跳 30 秒、连续 2 次没收到 pong 判断线并无限重连；被顶号自动退出，由保活拉起
-- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起（条目里写死当前 node 的绝对路径，换了 node 版本重新装一次）；`--uninstall-cron` 移除
-- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起（条目里写死当前 node 的绝对路径和 PATH，换了 node 版本重新装一次；找不到 node 时安装直接报错）；`--uninstall-cron` 移除；`--status` 只检查不动作
+- `MUSE_WECOM_ROOT` 可以指向和代码分开的纯数据目录：那里没有 `dist/daemon.js` 时 keepalive 用脚本所在仓库的；`--install-cron` 写仓库里的 `keepalive.sh` 并带上 `MUSE_WECOM_ROOT`（ROOT 就是脚本目录时条目不带）；doctor、`send-test.mjs`、`send-card-demo.mjs` 也认它
+- keepalive 运行和 `--install-cron` 时把 node 绝对路径记到 `<ROOT>/.node-bin`（数据目录与代码分开时再记 `.keepalive-path`）；自己找不到 node 时也读 `.node-bin`
+- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒；拉起时传 `MUSE_WECOM_ROOT` 和 `NODE_BIN`，PATH 里没有 node 就用 `.node-bin`）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
 - `npm run doctor`：只读自检，有 FAIL 退出码 1；"白名单等待配对"是 WARN，配对完就消失
+
+## 升级已有部署（0.3.5）
+
+1. `git pull && npm ci && npm run build`，重启 daemon
+2. 把 `hooks/wecom-inbox-watch.sh` 重新复制到 `~/hooks/scripts/`
+3. 用 `hooks/wecom-inbox-watch.json` 重新注册 hook 定义（保留自己的 `delivery.to`）——0.3.5 的 prompt 改了 2a3 白名单和 `<bridge_root>` 路径
+4. 装过 cron 的重新运行 `bash keepalive.sh --install-cron`
+
+之后 `npm run doctor` 无 FAIL 再收尾。注意兼容性变化：以前能发给任意 userid / 群的主动推送，现在只能发主人私聊或授权群。
 
 ## 外部影响
 
