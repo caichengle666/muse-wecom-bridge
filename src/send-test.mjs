@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WSClient } from "@wecom/aibot-node-sdk";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = process.env.MUSE_WECOM_ROOT || join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function parseEnvFile(text) {
   const out = {};
