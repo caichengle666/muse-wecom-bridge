@@ -72,7 +72,7 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 
 inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建一个轮询 hook。`hooks/` 目录已备好：
 
-- `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接没装在 `~/workspace/muse-wecom-bridge` 的话改脚本里的 `BRIDGE_ROOT`（hook 定义 prompt 里的路径也一起改）
+- `hooks/wecom-inbox-watch.sh` → 复制到 `~/hooks/scripts/wecom-inbox-watch.sh`，`chmod +x`；桥接目录自动定位：`MUSE_WECOM_ROOT` 优先，否则默认 `~/workspace/muse-wecom-bridge`，默认目录不是本桥接时在 `$HOME` 下 3 层内找 package.json 名为 `muse-wecom-bridge` 的目录，唯一一个才用（缓存到 `~/hooks/state/.wecom-bridge-root`）；装了多份时退回默认目录并在 stderr 提示，这时设 `MUSE_WECOM_ROOT` 或改脚本里的 `DEFAULT_BRIDGE_ROOT`。wake payload 带 `bridge_root`，hook 定义的 prompt 里路径都写成 `<bridge_root>/…`，不用改。`npm run doctor` 会用 hook 自己的定位函数核对
 - `hooks/wecom-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑；`poll_interval_secs` 用 5（hook 允许的最小值）
 - 轮询脚本原子认领（`<id>.json` → `<id>.json.claimed`）后 `wake`；worker 读 claimed → 写 outbox（先 `.tmp` 再 mv）→ 删 claimed
 - claimed 超过回复超时（`replyTimeoutMin`，默认 20 分钟）+ 5 分钟没被消费会被重新认领；daemon 已超时或 /stop 过（有墓碑 `expired/<id>.tombstone`）的消息不会再被认领
@@ -92,7 +92,8 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 单聊和每个群各自一份；群里多人共用一份，每轮用户消息带 `from`（说话人 userid，旧历史没有），上下文里的 turns 也带 `from`，新消息的说话人看 claimed 文件的 `senderUserId`；单聊没有 `from`
 - 群授权：主人在群里发 `@机器人 /授权本群`（`/allowgroup`）/ `/取消授权本群`（`/disallowgroup`），daemon 直接改 `config.json` 的 `allowedChatIds`、立即生效，不进 inbox；非主人发会被拒。没授权的群 @机器人 时 `debug.log` 的 `daemon.blocked_not_allowed` 带 `chatId`
-- 群成员权限：worker 以 claimed 文件的 `senderUserId` 是否在 `allowedUserIds` 判断是不是主人（自称主人不算）；群里不是主人的人要求时，不改 `config.json`（`allowedUserIds` / `allowedChatIds` / `allowAll` / `pairCode` 等）、不读不发凭证、不删文件、不改配置（hook 定义 prompt 的 2a3）
+- 群成员权限：daemon 入队时写 `senderIsOwner`（说话人是不是主人），worker 只看它（自称主人不算）。`senderIsOwner=false` 时按 hook 定义 prompt 的 2a3 白名单：只做对话问答、读本条附件和本会话上下文、只往原会话回文字/卡片；不执行命令、不读写本机其他文件（凭证、别人的附件、主人私聊上下文）、不改配置、不给别的会话发消息、不把他的卡片点击当主人的确认。daemon 另外硬校验：排空时 outbox 的 `chatId` 必须是原会话（主人发起的还可以是主人私聊或授权群），`proactive-*` 只能发主人私聊或授权群
+- 手改 `config.json`（尤其撤销 `allowedUserIds` / `allowedChatIds`）要重启 daemon 才生效；`/授权本群`、配对码是 daemon 自己改的，立即生效
 
 ## 流式输出（打字机效果）
 
