@@ -1,5 +1,14 @@
 # 更新日志
 
+## 0.3.6
+
+- 保活：数值环境变量（`MUSE_WECOM_*_SEC`、`_LOG_MAX_MB`）写错（如 `90s`）时 `[ -lt ]` 报错，健康的 daemon 会被判成不健康、每 5 分钟杀一次。现在校验成整数（宽限/停滞可为 0），不合法改用默认值并在 daemon.log 警告，`--status` 也在 stderr 提示
+- 保活：连续拉起失败时指数退避（2→4→8…分钟，封顶 `MUSE_WECOM_BACKOFF_MAX_SEC`，默认 1800 秒；连上清零，状态在 `.keepalive-backoff`）。以前断网/代理不通时 hook 每 2 分钟触发一次、每次都杀掉正在重连的 daemon。新增 `--force` 忽略退避；hook prompt 第 0 步改用 `keepalive.sh --force`
+- 保活：pid + 启动时间 + 脚本路径都对上、只是心跳文件缺失/损坏/令牌不符的进程，以前永远不杀，又占着 daemon.lock 让新进程起不来。现在过了启动宽限且心跳文件 STALE 秒没更新就杀掉重拉（pid 复用仍然绝不误杀）
+- 保活：`daemon.log`、`keepalive.cron.log` 超过 `MUSE_WECOM_LOG_MAX_MB`（默认 10）MB 时 copytruncate 轮转成 `.1`；cron 条目输出改写到 `keepalive.cron.log`，不再丢进 `/dev/null`
+- 测试：新增 `keepalive-hardening.test.ts`
+- 升级：`git pull`；用新的 hook 定义更新 prompt；装过 cron 的重新运行 `bash keepalive.sh --install-cron`。daemon 不用重启
+
 ## 0.3.5
 
 - 修复（H1）授权群里非主人的权限只靠提示词黑名单：
