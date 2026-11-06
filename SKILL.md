@@ -120,10 +120,18 @@ inbox 里的消息不会自己处理——部署完 daemon 后要在 Muse 里建
 - `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机 30 秒后拉起（条目里写死当前 node 的绝对路径和 PATH，换了 node 版本重新装一次；找不到 node 时安装直接报错）；`--uninstall-cron` 移除；`--status` 只检查不动作
 - `MUSE_WECOM_ROOT` 可以指向和代码分开的纯数据目录：那里没有 `dist/daemon.js` 时 keepalive 用脚本所在仓库的；`--install-cron` 写仓库里的 `keepalive.sh` 并带上 `MUSE_WECOM_ROOT`（ROOT 就是脚本目录时条目不带）；doctor、`send-test.mjs`、`send-card-demo.mjs` 也认它
 - keepalive 运行和 `--install-cron` 时把 node 绝对路径记到 `<ROOT>/.node-bin`（数据目录与代码分开时再记 `.keepalive-path`）；自己找不到 node 时也读 `.node-bin`
-- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒；拉起时传 `MUSE_WECOM_ROOT` 和 `NODE_BIN`，PATH 里没有 node 就用 `.node-bin`）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron，两次至少隔 120 秒；拉起时传 `MUSE_WECOM_ROOT` 和 `NODE_BIN`，PATH 里没有 node 就用 `.node-bin`）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh --force`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- 连续拉起失败（拉起后 WAIT_SEC 内没连上）会退避：第 1 次失败后 2 分钟内不再自动拉起，之后 4、8、16 分钟……封顶 `MUSE_WECOM_BACKOFF_MAX_SEC`（默认 1800）；连上后清零。退避期间已在跑的 daemon 不会被杀（让 SDK 自己重连）。状态在 `<ROOT>/.keepalive-backoff`；手动排障用 `bash keepalive.sh --force` 忽略退避立即重试
+- 数值环境变量（`MUSE_WECOM_GRACE_SEC` / `_START_GRACE_SEC` / `_STALE_SEC` 可为 0，`_WAIT_SEC` / `_BACKOFF_MAX_SEC` / `_LOG_MAX_MB` ≥1）写错（如 `90s`）时改用默认值并在 daemon.log 警告，不会再把健康的 daemon 当成不健康反复杀
+- pid + 启动时间 + 命令行脚本都对上（排除 pid 复用）、只是心跳文件缺失/损坏/令牌不符的进程：过了启动宽限且心跳文件 STALE 秒没更新，也会被杀掉重拉（以前会一直占着 daemon.lock 卡死）
+- `daemon.log` 和 cron 输出 `keepalive.cron.log` 超过 `MUSE_WECOM_LOG_MAX_MB`（默认 10）MB 时轮转成 `.1`（复制后截断，daemon 不用重启）；cron 条目的输出不再丢进 `/dev/null`
 - `npm run doctor`：只读自检，有 FAIL 退出码 1；"白名单等待配对"是 WARN，配对完就消失
 
-## 升级已有部署（0.3.5）
+## 升级已有部署（0.3.6）
+
+从 0.3.5 升：`git pull`，重新复制 `hooks/wecom-inbox-watch.sh`（脚本没变也无妨），用新的 `hooks/wecom-inbox-watch.json` 更新 hook 定义（prompt 第 0 步改成 `keepalive.sh --force`），装过 cron 的重新运行 `bash keepalive.sh --install-cron`（条目输出改写到 `keepalive.cron.log`）。daemon 代码没变，不用重启。
+
+### 从更早版本升到 0.3.5
 
 1. `git pull && npm ci && npm run build`，重启 daemon
 2. 把 `hooks/wecom-inbox-watch.sh` 重新复制到 `~/hooks/scripts/`
