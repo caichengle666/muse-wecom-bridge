@@ -143,9 +143,12 @@ realpath 后就是 `$ROOT/dist/daemon.js`（ROOT 是纯数据目录时为脚本�
 其余情况（被顶号后的僵尸、长时间断线、心跳停滞）杀掉重拉；拉起后等到身份核实且 `connected:true` 的心跳才算成功。
 keepalive 自身用 flock 防并发（拿不到锁会在 daemon.log 记一行）；系统没有 flock 时警告并退回 mkdir 锁。
 
+连续拉起失败会退避（2→4→8…分钟，封顶 `MUSE_WECOM_BACKOFF_MAX_SEC`，默认 30 分钟；连上清零），断网时不会每两分钟杀一次；手动排障用 `bash keepalive.sh --force` 跳过退避。数值环境变量写错时用默认值并警告；心跳文件坏掉的本 daemon 进程超时后也会被杀掉重拉；`daemon.log`、`keepalive.cron.log` 超过 `MUSE_WECOM_LOG_MAX_MB`（默认 10）MB 自动轮转成 `.1`。
+
 ```bash
 bash keepalive.sh            # 检查并在需要时拉起
 bash keepalive.sh --status   # 只检查，健康 exit 0 / 不健康 exit 1
+bash keepalive.sh --force    # 忽略退避立即重试
 
 bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行；条目里写死 node 绝对路径，换 node 版本后重装）
 bash keepalive.sh --uninstall-cron
