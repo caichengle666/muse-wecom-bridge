@@ -49,3 +49,6 @@ config.json
 Thumbs.db
 __pycache__/
 onboard-qr.png
+.keepalive-backoff
+.keepalive-backoff.tmp.*
+*.log.1
